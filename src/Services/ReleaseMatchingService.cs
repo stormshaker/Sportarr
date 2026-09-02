@@ -314,7 +314,7 @@ public class ReleaseMatchingService
         var parseResult = preParsed ?? _sportsParser.Parse(release.Title);
 
         // AUTHORITATIVE ID TOKEN (docs/RELEASE_NAMING.md): a release tagged
-        // {sportarr-ev-XXXXXXX} in its name, or carrying a "sportarrid"
+        // sportarr-ev-XXXXXXX in its name, or carrying a "sportarrid"
         // torznab/newznab attribute from the indexer, names its event
         // exactly. When the tagged id matches this event's canonical id,
         // that IS the match - no fuzzy team/date/round arithmetic can
@@ -570,10 +570,22 @@ public class ReleaseMatchingService
             _logger.LogTrace("[Release Matching] Date comparison: release={ReleaseDate}, event={EventDate}, diff={Days} days",
                 parseResult.EventDate.Value.ToString("yyyy-MM-dd"), eventDate.ToString("yyyy-MM-dd"), daysDiff);
 
-            if (daysDiff <= 1)
+            if (daysDiff == 0)
             {
                 result.Confidence += 25;
                 result.MatchReasons.Add("Date matches exactly");
+            }
+            else if (daysDiff <= 1 && (!isTeamSport || evt.BroadcastDate == null || !evt.BroadcastDateVerified))
+            {
+                // One day of grace absorbs the UTC-vs-venue rollover, but
+                // only while the event's broadcast-local date is unknown.
+                // With a broadcast date in hand the rollover is already
+                // absorbed, and for team sports the neighboring day is the
+                // neighboring GAME: an MLB series plays daily, so a one-day
+                // window hands over yesterday's matchup between the same
+                // two teams as today's.
+                result.Confidence += 25;
+                result.MatchReasons.Add("Date within 1 day (timezone rollover)");
             }
             else if (!isTeamSport && daysDiff <= 3)
             {

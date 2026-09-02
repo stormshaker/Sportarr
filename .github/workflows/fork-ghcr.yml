@@ -1,0 +1,108 @@
+name: Fork Image (ghcr.io)
+
+# Builds this fork's patched image and publishes it to ghcr.io so the NAS can
+# pull it directly. Deliberately much smaller than the upstream release
+# workflows: no GitHub Release, no installer, no Windows/macOS artifacts, no
+# Discord webhook, and no Docker Hub push (upstream's DOCKERHUB_* secrets do
+# not exist in a fork). amd64 only - the box that runs this is x86_64, and
+# skipping the QEMU arm64 leg roughly halves the build.
+
+on:
+  push:
+    branches:
+      - main
+      - 'fix/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # Each component of an assembly version must fit in a UInt16, so a
+      # yyyymmddHHMM stamp is not a legal revision. Use the run number.
+      - name: Compute version
+        id: v
+        run: echo "version=4.1.6.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      # setup-dotnet installs alongside the runner's preinstalled SDKs rather
+      # than replacing them, and with no global.json in the repo the CLI picks
+      # the newest it can see - currently 10.0.400, which fails to restore this
+      # net8.0 solution. Pin the SDK for this build only; the file is generated
+      # here rather than committed so the upstream PR carries no CI-only files.
+      - name: Pin SDK 8 for this build
+        run: |
+          cat > global.json <<'JSON'
+          { "sdk": { "version": "8.0.100", "rollForward": "latestFeature" } }
+          JSON
+          dotnet --version
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Copy frontend to wwwroot
+        run: |
+          rm -rf src/wwwroot/assets src/wwwroot/index.html
+          mkdir -p src/wwwroot/assets
+          cp -r _output/UI/* src/wwwroot/
+
+      # --self-contained false / PublishSingleFile false: the runtime image is
+      # already aspnet:8.0, matching upstream's docker-linux-x64 target.
+      - name: Publish linux-x64
+        run: |
+          dotnet publish src/Sportarr.csproj -c Release -r linux-x64 \
+            --self-contained false -p:PublishSingleFile=false \
+            -p:SkipFrontendBuild=true -p:Version=${{ steps.v.outputs.version }} \
+            -o publish/docker-linux-x64
+          # The Dockerfile COPYs both arch dirs unconditionally and picks by
+          # TARGETPLATFORM, so the unused arm64 path still has to exist.
+          mkdir -p publish/docker-linux-arm64
+          touch publish/docker-linux-arm64/.placeholder
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # main -> :latest (what the NAS runs) plus :main; branches -> :<branch>.
+      # Every build also gets an immutable :sha- tag to roll back to.
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/sportarr
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=sha
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          pull: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            SPORTARR_BRANCH=${{ github.ref_name }}
+            CACHEBUST=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

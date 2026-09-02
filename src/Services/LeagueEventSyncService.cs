@@ -305,13 +305,15 @@ public class LeagueEventSyncService
         _logger.LogInformation("[League Event Sync] Syncing {Count} seasons for league: {LeagueName}",
             seasons.Count, league.Name);
 
-        // One-query preload of every Scheduled DVR recording, replacing the
-        // former per-existing-event lookup — one DB round-trip per event and
-        // the second-largest contributor in the [Sync Metrics] baseline.
-        // Grouped by EventId; rows realigned inside ProcessEvent stay
-        // tracked on this context, so the per-season SaveChanges persists
-        // them exactly as the per-event query version did.
-        var scheduledRecordingsByEventId = (await _db.DvrRecordings
+        // One query per season for every Scheduled DVR recording, replacing
+        // the former per-existing-event lookup that was the second-largest
+        // contributor in the [Sync Metrics] baseline. Loaded inside the loop
+        // rather than hoisted above it, because the per-season tracker clear
+        // detaches whatever the previous season loaded, and a realignment
+        // written to a detached row saves nothing. Each season works on rows
+        // this context is actually tracking.
+        async Task<Dictionary<int, List<DvrRecording>>> LoadScheduledRecordingsAsync() =>
+            (await _db.DvrRecordings
                 .Where(r => r.Status == DvrRecordingStatus.Scheduled && r.EventId != null)
                 .ToListAsync())
             .GroupBy(r => r.EventId!.Value)
@@ -323,6 +325,8 @@ public class LeagueEventSyncService
         {
             cancellationToken.ThrowIfCancellationRequested();
             seasonIndex++;
+
+            var scheduledRecordingsByEventId = await LoadScheduledRecordingsAsync();
             var seasonStartCount = result.NewCount + result.UpdatedCount;
 
             // Per-season progress checkpoint. Maps the season index
@@ -862,6 +866,13 @@ public class LeagueEventSyncService
 
             // Save changes after each season (batch save)
             await _db.SaveChangesAsync();
+
+            // Forget the season we just saved. Every entity from every earlier
+            // season stayed tracked otherwise, so a thirty-season league held
+            // thousands of them and DetectChanges walked the whole set on each
+            // season's save, which made the sync slower the longer it ran.
+            _db.ChangeTracker.Clear();
+
             await FlushStreamAsync();
 
             var seasonEventsProcessed = (result.NewCount + result.UpdatedCount) - seasonStartCount;
@@ -970,8 +981,16 @@ public class LeagueEventSyncService
             }
         }
 
-        // Update league's last sync timestamp
-        league.LastUpdate = DateTime.UtcNow;
+        // Update league's last sync timestamp. The per-season tracker clear
+        // detached the league loaded at the top, so stamping that copy would
+        // save nothing and the auto sync would treat the league as forever
+        // stale and walk the whole schedule again on every pass.
+        var stampedLeague = await _db.Leagues.FirstOrDefaultAsync(l => l.Id == league.Id);
+        if (stampedLeague != null)
+        {
+            stampedLeague.LastUpdate = DateTime.UtcNow;
+            league.LastUpdate = stampedLeague.LastUpdate;
+        }
         await _db.SaveChangesAsync();
         await FlushStreamAsync();
 
@@ -1004,9 +1023,13 @@ public class LeagueEventSyncService
                             renumberedCount, seasonStr);
                     }
 
-                    // ALWAYS scan and rename files to ensure they match current naming format
-                    // This catches files that were imported with wrong episode numbers or old naming format
-                    var renamedCount = await _fileRenameService.RenameAllFilesInSeasonAsync(seasonLeagueId, seasonStr);
+                    // Rename only the files whose season or episode marker no
+                    // longer matches, so a renumbered season keeps its files
+                    // identifiable. A naming format change on its own is left
+                    // to a manual rename, as in the other arrs. This used to
+                    // enforce the whole format and rewrote every file in a
+                    // library the moment its owner edited the format.
+                    var renamedCount = await _fileRenameService.RenameAllFilesInSeasonAsync(seasonLeagueId, seasonStr, numberingOnly: true);
                     totalRenamed += renamedCount;
 
                     if (renamedCount > 0)
@@ -1645,6 +1668,15 @@ public class LeagueEventSyncService
             // when leagues.broadcast_timezone changes). Flag the season for
             // renumber + rename so existing files pick up the new branding
             // calendar date in their filename.
+            // An equal wire-served date still upgrades provenance: a legacy
+            // UTC backfill that happened to match must not keep the
+            // exact-day matching rule disarmed forever.
+            if (apiEvent.BroadcastDate.HasValue && !apiEvent.BroadcastDateIsFallback
+                && !existingEvent.BroadcastDateVerified
+                && existingEvent.BroadcastDate == apiEvent.BroadcastDate)
+            {
+                existingEvent.BroadcastDateVerified = true;
+            }
             if (apiEvent.BroadcastDate.HasValue && existingEvent.BroadcastDate != apiEvent.BroadcastDate)
             {
                 _logger.LogInformation("[League Event Sync] Broadcast date changed for '{EventTitle}': {OldDate} → {NewDate}",
@@ -1652,6 +1684,7 @@ public class LeagueEventSyncService
                     existingEvent.BroadcastDate?.ToString("yyyy-MM-dd") ?? "null",
                     apiEvent.BroadcastDate.Value.ToString("yyyy-MM-dd"));
                 existingEvent.BroadcastDate = apiEvent.BroadcastDate;
+                existingEvent.BroadcastDateVerified = !apiEvent.BroadcastDateIsFallback;
                 dateChanged = true;
                 needsUpdate = true;
 
@@ -1930,6 +1963,7 @@ public class LeagueEventSyncService
             Round = apiEvent.Round,
             EventDate = apiEvent.EventDate,
             BroadcastDate = apiEvent.BroadcastDate,
+            BroadcastDateVerified = apiEvent.BroadcastDate.HasValue && !apiEvent.BroadcastDateIsFallback,
             Venue = apiEvent.Venue,
             Location = apiEvent.Location,
             Broadcast = apiEvent.Broadcast,

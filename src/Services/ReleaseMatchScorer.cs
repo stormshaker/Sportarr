@@ -262,8 +262,8 @@ public class ReleaseMatchScorer
     private static readonly Regex _yearRegex = new(@"\b((?:19[3-9]\d|20\d\d))\b", RegexOptions.Compiled);
     private static readonly Regex _parseRoundRegex = new(@"(?:Round|R|Week|W)[\.\s]*(\d{1,2})\b", RegexOptions.Compiled | RegexOptions.IgnoreCase);
     private static readonly Regex _gameNumberRegex = new(@"\bGame[\.\s_-]*(\d{1,2})\b", RegexOptions.Compiled | RegexOptions.IgnoreCase);
-    private static readonly Regex _isoDateRegex = new(@"\b((?:19[3-9]\d|20\d\d))[.\-](\d{2})[.\-](\d{2})\b", RegexOptions.Compiled);
-    private static readonly Regex _euroDateRegex = new(@"\b(\d{2})[.\-](\d{2})[.\-]((?:19[3-9]\d|20\d\d))\b", RegexOptions.Compiled);
+    private static readonly Regex _isoDateRegex = new(@"\b((?:19[3-9]\d|20\d\d))[.\-\s](\d{2})[.\-\s](\d{2})\b", RegexOptions.Compiled);
+    private static readonly Regex _euroDateRegex = new(@"\b(\d{2})[.\-\s](\d{2})[.\-\s]((?:19[3-9]\d|20\d\d))\b", RegexOptions.Compiled);
 
     // DetectSportPrefix patterns - hit per release in the parse pass.
     private static readonly Regex _formula3WordRegex = new(@"\bFORMULA[\.\-\s]*3\b", RegexOptions.Compiled);
@@ -567,7 +567,17 @@ public class ReleaseMatchScorer
         // Team name matching (for team sports)
         // CRITICAL: Team matching can return negative scores for wrong games/non-games
         // These negative scores should cause immediate rejection (return 0)
-        if (IsTeamSport(eventSportPrefix))
+        // An event that names two teams is a team fixture, whatever its league.
+        // IsTeamSport is a hardcoded prefix whitelist (NFL/NBA/NHL/MLB/MLS/EPL/
+        // UCL/LaLiga), so every other team league - NRL, AFL, the EFL tiers,
+        // Bundesliga - got no team check at all: a release for a completely
+        // different fixture in the same round scored the same as the correct
+        // one, because only the year, league and round were ever compared.
+        // That is the same gap the date block below already works around by
+        // falling back to "both team ids known", so use the same reasoning
+        // here, keyed on the team names the matcher actually compares.
+        if (IsTeamSport(eventSportPrefix)
+            || (!string.IsNullOrEmpty(evt.HomeTeamName) && !string.IsNullOrEmpty(evt.AwayTeamName)))
         {
             var teamScore = GetTeamMatchScore(releaseTitle, evt);
             if (teamScore < 0)
@@ -578,8 +588,12 @@ public class ReleaseMatchScorer
         // Date matching (for team sports with specific dates)
         // CRITICAL: a definite different date is a wrong-event signal, the same
         // way a wrong team or a wrong fighter is, so it rejects rather than
-        // scoring low.
-        if (IsDateBasedSport(eventSportPrefix))
+        // scoring low. Any fixture with both teams known is date-told:
+        // the prefix list alone left every league outside it (NRL, AFL,
+        // Bundesliga) with no date check at all, while the validation
+        // service applies one to every sport.
+        if (IsDateBasedSport(eventSportPrefix)
+            || (evt.HomeTeamId.HasValue && evt.AwayTeamId.HasValue))
         {
             var dateScore = GetDateMatchScore(parsed, evt);
             if (dateScore < 0)
@@ -1353,15 +1367,23 @@ public class ReleaseMatchScorer
         {
             try
             {
-                var parsedDate = new DateTime(eventDate.Year, parsed.Month.Value, parsed.Day.Value);
+                // The release's own year decides which season's meeting this
+                // is. Rebuilding with the event's year made last season's
+                // game on another day look like a wrong day at worst, and a
+                // game on the same calendar day a year apart look identical.
+                var parsedDate = new DateTime(parsed.Year ?? eventDate.Year, parsed.Month.Value, parsed.Day.Value);
                 var diffDays = Math.Abs((parsedDate - eventDate).TotalDays);
                 if (diffDays == 0)
                 {
                     score += 10;                  // exact day
                 }
-                else if (diffDays <= 1)
+                else if (diffDays <= 1 && !(evt.BroadcastDate.HasValue && evt.BroadcastDateVerified && evt.HomeTeamId.HasValue && evt.AwayTeamId.HasValue))
                 {
-                    score += 8;                   // off-by-one (timezone rollover)
+                    // Off-by-one absorbs the UTC-vs-venue rollover, but only
+                    // while the broadcast-local date is unknown. With it in
+                    // hand and both teams known, the neighboring day is the
+                    // neighboring game of a series that can play daily.
+                    score += 8;
                 }
                 else if (evt.HomeTeamId.HasValue && evt.AwayTeamId.HasValue)
                 {
@@ -1666,6 +1688,19 @@ public class ReleaseMatchScorer
             "new", "los", "san", "las", "st", "saint"
         };
 
+        // Generic club-name words that identify no club on their own. These are
+        // overwhelmingly suffixes in British and European football ("Stoke City",
+        // "Newcastle United", "Bolton Wanderers"), which makes them dangerous in
+        // two ways: they collide across clubs in the same league, and the naive
+        // "nickname is the last word" rule below picks them as the identifying
+        // token. Without this, "Stoke City" vs "Norwich City" matched a release
+        // for "Birmingham City vs Southampton" on the shared word "City" alone.
+        var genericClubWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "city", "united", "town", "county", "rovers", "wanderers", "albion",
+            "athletic", "atletico", "real", "sporting", "club", "football"
+        };
+
         var matchedWords = teamWords
             .Where(w => normalizedRelease.Contains(w, StringComparison.OrdinalIgnoreCase))
             .ToList();
@@ -1676,9 +1711,12 @@ public class ReleaseMatchScorer
             return CheckTeamAbbreviation(normalizedRelease, teamName);
         }
 
-        // Get the team nickname (typically the last word - "Saints", "Dolphins", "Jets", "Chiefs")
+        // Get the team nickname (typically the last word - "Saints", "Dolphins", "Jets", "Chiefs").
+        // A generic suffix is not an identifying nickname, so it does not get the
+        // certainty the nickname signal normally confers.
         var teamNickname = teamWords.Last();
-        var nicknameMatches = normalizedRelease.Contains(teamNickname, StringComparison.OrdinalIgnoreCase);
+        var nicknameMatches = !genericClubWords.Contains(teamNickname)
+            && normalizedRelease.Contains(teamNickname, StringComparison.OrdinalIgnoreCase);
 
         // Calculate match percentage
         var matchPercentage = (double)matchedWords.Count / teamWords.Count;
@@ -1686,8 +1724,10 @@ public class ReleaseMatchScorer
         // Determine if this is a real match:
         // 1. Team nickname must match, OR
         // 2. At least 50% of significant words must match
-        // 3. But if ONLY city prefix words match (like just "New"), it's NOT a match
-        var onlyCityPrefixesMatch = matchedWords.All(w => cityPrefixes.Contains(w));
+        // 3. But if ONLY filler words match - a city prefix like "New", or a
+        //    generic suffix like "City" - it's NOT a match
+        var onlyCityPrefixesMatch = matchedWords.All(w =>
+            cityPrefixes.Contains(w) || genericClubWords.Contains(w));
 
         bool hasMatch;
         if (onlyCityPrefixesMatch)
@@ -1715,8 +1755,24 @@ public class ReleaseMatchScorer
             hasMatch = false;
         }
 
-        // Score based on match percentage (max 20 points)
-        var score = hasMatch ? (int)(20.0 * matchPercentage) : 0;
+        // Score based on match percentage (max 20 points).
+        //
+        // A nickname match scores full marks rather than being scaled by the
+        // word ratio. The nickname is the identifying part of the name -
+        // "Rabbitohs" names exactly one NRL club - so a release that omits the
+        // city ("Round.20.Raiders.v.Rabbitohs") is not a weaker match than one
+        // that spells it out, it is the same fixture named the way that
+        // league's groups conventionally name it. Scaling by ratio pushed
+        // those correct releases below AutoGrabMatchScore (South Sydney
+        // Rabbitohs matched 1 of 3 words = 6/20) while releases for leagues
+        // whose groups use full club names scored 20/20, so whether a fixture
+        // could auto-grab depended on the naming convention of its league
+        // rather than on how certain the match was.
+        //
+        // This cannot admit a wrong fixture: GetTeamMatchScore already returns
+        // a negative score when only one of an event's two teams matches, so
+        // wrong matchups are rejected before this value is ever used.
+        var score = hasMatch ? (nicknameMatches ? 20 : (int)(20.0 * matchPercentage)) : 0;
 
         return (hasMatch, score);
     }
