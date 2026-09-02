@@ -30,6 +30,18 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
+      # setup-dotnet installs alongside the runner's preinstalled SDKs rather
+      # than replacing them, and with no global.json in the repo the CLI picks
+      # the newest it can see - currently 10.0.400, which fails to restore this
+      # net8.0 solution. Pin the SDK for this build only; the file is generated
+      # here rather than committed so the upstream PR carries no CI-only files.
+      - name: Pin SDK 8 for this build
+        run: |
+          cat > global.json <<'JSON'
+          { "sdk": { "version": "8.0.100", "rollForward": "latestFeature" } }
+          JSON
+          dotnet --version
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
