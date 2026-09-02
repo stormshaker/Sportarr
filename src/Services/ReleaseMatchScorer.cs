@@ -1688,6 +1688,19 @@ public class ReleaseMatchScorer
             "new", "los", "san", "las", "st", "saint"
         };
 
+        // Generic club-name words that identify no club on their own. These are
+        // overwhelmingly suffixes in British and European football ("Stoke City",
+        // "Newcastle United", "Bolton Wanderers"), which makes them dangerous in
+        // two ways: they collide across clubs in the same league, and the naive
+        // "nickname is the last word" rule below picks them as the identifying
+        // token. Without this, "Stoke City" vs "Norwich City" matched a release
+        // for "Birmingham City vs Southampton" on the shared word "City" alone.
+        var genericClubWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "city", "united", "town", "county", "rovers", "wanderers", "albion",
+            "athletic", "atletico", "real", "sporting", "club", "football"
+        };
+
         var matchedWords = teamWords
             .Where(w => normalizedRelease.Contains(w, StringComparison.OrdinalIgnoreCase))
             .ToList();
@@ -1698,9 +1711,12 @@ public class ReleaseMatchScorer
             return CheckTeamAbbreviation(normalizedRelease, teamName);
         }
 
-        // Get the team nickname (typically the last word - "Saints", "Dolphins", "Jets", "Chiefs")
+        // Get the team nickname (typically the last word - "Saints", "Dolphins", "Jets", "Chiefs").
+        // A generic suffix is not an identifying nickname, so it does not get the
+        // certainty the nickname signal normally confers.
         var teamNickname = teamWords.Last();
-        var nicknameMatches = normalizedRelease.Contains(teamNickname, StringComparison.OrdinalIgnoreCase);
+        var nicknameMatches = !genericClubWords.Contains(teamNickname)
+            && normalizedRelease.Contains(teamNickname, StringComparison.OrdinalIgnoreCase);
 
         // Calculate match percentage
         var matchPercentage = (double)matchedWords.Count / teamWords.Count;
@@ -1708,8 +1724,10 @@ public class ReleaseMatchScorer
         // Determine if this is a real match:
         // 1. Team nickname must match, OR
         // 2. At least 50% of significant words must match
-        // 3. But if ONLY city prefix words match (like just "New"), it's NOT a match
-        var onlyCityPrefixesMatch = matchedWords.All(w => cityPrefixes.Contains(w));
+        // 3. But if ONLY filler words match - a city prefix like "New", or a
+        //    generic suffix like "City" - it's NOT a match
+        var onlyCityPrefixesMatch = matchedWords.All(w =>
+            cityPrefixes.Contains(w) || genericClubWords.Contains(w));
 
         bool hasMatch;
         if (onlyCityPrefixesMatch)
