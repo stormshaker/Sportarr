@@ -567,7 +567,17 @@ public class ReleaseMatchScorer
         // Team name matching (for team sports)
         // CRITICAL: Team matching can return negative scores for wrong games/non-games
         // These negative scores should cause immediate rejection (return 0)
-        if (IsTeamSport(eventSportPrefix))
+        // An event that names two teams is a team fixture, whatever its league.
+        // IsTeamSport is a hardcoded prefix whitelist (NFL/NBA/NHL/MLB/MLS/EPL/
+        // UCL/LaLiga), so every other team league - NRL, AFL, the EFL tiers,
+        // Bundesliga - got no team check at all: a release for a completely
+        // different fixture in the same round scored the same as the correct
+        // one, because only the year, league and round were ever compared.
+        // That is the same gap the date block below already works around by
+        // falling back to "both team ids known", so use the same reasoning
+        // here, keyed on the team names the matcher actually compares.
+        if (IsTeamSport(eventSportPrefix)
+            || (!string.IsNullOrEmpty(evt.HomeTeamName) && !string.IsNullOrEmpty(evt.AwayTeamName)))
         {
             var teamScore = GetTeamMatchScore(releaseTitle, evt);
             if (teamScore < 0)
