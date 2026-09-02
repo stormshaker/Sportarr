@@ -10,6 +10,7 @@ name: Fork Image (ghcr.io)
 on:
   push:
     branches:
+      - main
       - 'fix/**'
   workflow_dispatch:
 
@@ -81,15 +82,25 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # main -> :latest (what the NAS runs) plus :main; branches -> :<branch>.
+      # Every build also gets an immutable :sha- tag to roll back to.
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/sportarr
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=sha
+
       - uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64
           push: true
           pull: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/sportarr:nickname-fix
-            ghcr.io/${{ github.repository_owner }}/sportarr:${{ github.sha }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             SPORTARR_BRANCH=${{ github.ref_name }}
             CACHEBUST=${{ github.sha }}
