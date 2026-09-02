@@ -22,9 +22,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Each component of an assembly version must fit in a UInt16, so a
+      # yyyymmddHHMM stamp is not a legal revision. Use the run number.
       - name: Compute version
         id: v
-        run: echo "version=4.1.6.$(date +%Y%m%d%H%M)" >> "$GITHUB_OUTPUT"
+        run: echo "version=4.1.6.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-dotnet@v4
         with:
