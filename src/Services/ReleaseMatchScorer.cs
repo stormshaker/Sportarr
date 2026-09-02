@@ -1727,8 +1727,24 @@ public class ReleaseMatchScorer
             hasMatch = false;
         }
 
-        // Score based on match percentage (max 20 points)
-        var score = hasMatch ? (int)(20.0 * matchPercentage) : 0;
+        // Score based on match percentage (max 20 points).
+        //
+        // A nickname match scores full marks rather than being scaled by the
+        // word ratio. The nickname is the identifying part of the name -
+        // "Rabbitohs" names exactly one NRL club - so a release that omits the
+        // city ("Round.20.Raiders.v.Rabbitohs") is not a weaker match than one
+        // that spells it out, it is the same fixture named the way that
+        // league's groups conventionally name it. Scaling by ratio pushed
+        // those correct releases below AutoGrabMatchScore (South Sydney
+        // Rabbitohs matched 1 of 3 words = 6/20) while releases for leagues
+        // whose groups use full club names scored 20/20, so whether a fixture
+        // could auto-grab depended on the naming convention of its league
+        // rather than on how certain the match was.
+        //
+        // This cannot admit a wrong fixture: GetTeamMatchScore already returns
+        // a negative score when only one of an event's two teams matches, so
+        // wrong matchups are rejected before this value is ever used.
+        var score = hasMatch ? (nicknameMatches ? 20 : (int)(20.0 * matchPercentage)) : 0;
 
         return (hasMatch, score);
     }
