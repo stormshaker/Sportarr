@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef } from 'react';
+import { useState, useMemo, useRef, useDeferredValue } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { MagnifyingGlassIcon, GlobeAltIcon, TrophyIcon, CheckCircleIcon } from '@heroicons/react/24/outline';
@@ -48,17 +48,14 @@ interface AddedLeagueInfo {
   externalId: string;
 }
 
-const isInternalLeagueName = (name: string) => {
-  const normalized = name.trim();
-  return normalized.startsWith('_') || normalized.endsWith('_');
-};
-
 // Set when the user reached this page from a manual import that had no league
 // to import against. Adding one sends them straight back to that file.
 interface ImportReturn {
   pendingImportId: number;
   fileName: string;
 }
+
+const MAX_RENDERED_LEAGUES = 200;
 
 export default function LeagueSearchPage() {
   const navigate = useNavigate();
@@ -80,13 +77,27 @@ export default function LeagueSearchPage() {
   const deleteModalDataRef = useRef<{ leagueId: number; leagueName: string; eventCount: number } | null>(null);
 
   // Fetch all leagues from Sportarr API
+  // Deferring the term keeps the input painting while the next page loads,
+  // and coalesces a burst of keystrokes into far fewer round trips.
+  const deferredSearchQuery = useDeferredValue(searchQuery);
+  const [matchedLeagueCount, setMatchedLeagueCount] = useState(0);
+
   const { data: allLeagues = [], isLoading } = useQuery({
-    queryKey: ['sportarr-leagues', 'all'],
+    queryKey: ['sportarr-leagues', 'all', deferredSearchQuery, selectedSport],
     queryFn: async () => {
-      const response = await apiGet('/api/leagues/all');
+      const params = new URLSearchParams({ limit: String(MAX_RENDERED_LEAGUES) });
+      if (deferredSearchQuery.trim()) params.set('q', deferredSearchQuery.trim());
+      if (selectedSport !== 'all') params.set('sport', selectedSport);
+
+      const response = await apiGet(`/api/leagues/all?${params.toString()}`);
       if (!response.ok) throw new Error('Failed to fetch leagues');
+      // Total before the server truncated, so the count line can still say
+      // how many more a narrower search would reach.
+      const matched = Number.parseInt(response.headers.get('x-total-count') ?? '', 10);
+      setMatchedLeagueCount(Number.isFinite(matched) ? matched : 0);
       return response.json() as Promise<League[]>;
     },
+    placeholderData: (previous) => previous,
     staleTime: 5 * 60 * 1000, // 5 minutes - data doesn't change often
     refetchOnWindowFocus: false, // Don't refetch on tab focus
   });
@@ -116,36 +127,9 @@ export default function LeagueSearchPage() {
     return map;
   }, [userLeagues]);
 
-  // Real-time filtering based on search query and selected sport, then sort alphabetically
-  const filteredLeagues = useMemo(() => {
-    let filtered = allLeagues;
-
-    // Filter by sport category. Compare case-insensitively because
-    // the same sport can ship from upstream with mixed casing
-    // ("Motorsport" vs "MotorSport") and we collapse those into a
-    // single chip above; an exact-equality filter here would only
-    // match one variant's leagues.
-    if (selectedSport !== 'all') {
-      const target = selectedSport.toLowerCase();
-      filtered = filtered.filter(league => (league.strSport ?? '').toLowerCase() === target);
-    }
-
-    // Filter by search query
-    if (searchQuery.trim()) {
-      const query = searchQuery.trim().toLowerCase();
-      filtered = filtered.filter(league =>
-        (league.strLeague ?? '').toLowerCase().includes(query) ||
-        league.strLeagueAlternate?.toLowerCase().includes(query) ||
-        (league.strSport ?? '').toLowerCase().includes(query) ||
-        league.strCountry?.toLowerCase().includes(query)
-      );
-    }
-
-    // Sort alphabetically; entries with _ prefix/suffix are internal records — hidden entirely
-    return filtered
-      .filter(l => !isInternalLeagueName(l.strLeague ?? ''))
-      .sort((a, b) => (a.strLeague ?? '').localeCompare(b.strLeague ?? ''));
-  }, [allLeagues, selectedSport, searchQuery]);
+  // Filtering and ordering happen server-side now; what arrives is the page
+  // to draw.
+  const filteredLeagues = allLeagues;
 
   // Apply column filters and column sort on top of filteredLeagues (compact table only)
   const tableLeagues = useMemo(
@@ -161,35 +145,25 @@ export default function LeagueSearchPage() {
     [filteredLeagues, colFilters, sortCol, sortDir]
   );
 
-  const sportFilters = useMemo(() => {
-    const filters = [{ id: 'all', name: 'All Sports', icon: '🌍' }];
+  // The chips come from their own endpoint rather than from the page of
+  // leagues on screen: that page moves with the filter, so deriving the chips
+  // from it would drop every sport except the selected one and leave no way
+  // back to "All Sports".
+  const { data: availableSports = [] } = useQuery({
+    queryKey: ['sportarr-league-sports'],
+    queryFn: async () => {
+      const response = await apiGet('/api/leagues/sports');
+      if (!response.ok) throw new Error('Failed to fetch sports');
+      return response.json() as Promise<string[]>;
+    },
+    staleTime: 30 * 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
 
-    // Case-insensitive dedup. The upstream metadata API has at least
-    // one inconsistency where a sport ships as both "Motorsport" and
-    // "MotorSport" depending on the league row, and a plain Set
-    // treats those as distinct - producing two visually identical
-    // chips on this page. Group by lowercase, keep the lexically
-    // first variant so the displayed casing is stable across
-    // refreshes regardless of which row was synced first.
-    const byLower = new Map<string, string>();
-    for (const l of allLeagues) {
-      if (isInternalLeagueName(l.strLeague ?? '')) continue;
-      const sport = l.strSport;
-      if (!sport) continue;
-      const key = sport.toLowerCase();
-      const existing = byLower.get(key);
-      if (existing == null || sport.localeCompare(existing) < 0) {
-        byLower.set(key, sport);
-      }
-    }
-    const uniqueSports = Array.from(byLower.values()).sort((a, b) => a.localeCompare(b));
-
-    uniqueSports.forEach(sport => {
-      filters.push({ id: sport, name: sport, icon: getSportIcon(sport) });
-    });
-
-    return filters;
-  }, [allLeagues]);
+  const sportFilters = useMemo(() => [
+    { id: 'all', name: 'All Sports', icon: '🌍' },
+    ...availableSports.map((sport) => ({ id: sport, name: sport, icon: getSportIcon(sport) })),
+  ], [availableSports]);
 
   const addLeagueMutation = useMutation({
     mutationFn: async ({
@@ -777,7 +751,7 @@ export default function LeagueSearchPage() {
           )}
         </div>
         <p className="mb-4 text-sm text-gray-500 md:mb-6">
-          Showing {isLoading ? '...' : filteredLeagues.length} of {allLeagues.length} leagues
+          Showing {isLoading ? '...' : filteredLeagues.length} of {matchedLeagueCount} leagues
           {searchQuery && ` matching "${searchQuery}"`}
           {selectedSport !== 'all' && ` in ${selectedSport}`}
         </p>
