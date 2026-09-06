@@ -17,9 +17,9 @@ import RefreshScopeModal, { type RefreshScope } from '../components/RefreshScope
 import { useSearchQueueStatus, useDownloadQueue, useTasks } from '../api/hooks';
 import { useUISettings } from '../hooks/useUISettings';
 import { useCompactView } from '../hooks/useCompactView';
-import { formatDateInTimezone, formatEventDate } from '../utils/timezone';
+import { formatEventDate } from '../utils/timezone';
 import { getRefetchIntervalWithBackoff } from '../utils/queryBackoff';
-import { PAGE_PADDING, BUTTON_PRIMARY, BUTTON_SECONDARY, BUTTON_SUCCESS, BUTTON_INFO, BUTTON_DESTRUCTIVE } from '../utils/designTokens';
+import { PAGE_PADDING, BUTTON_PRIMARY, BUTTON_SECONDARY, BUTTON_SUCCESS } from '../utils/designTokens';
 
 // The three league header buttons share one grid cell each, so they stay the
 // same size. A phone gets a smaller label and tighter padding rather than a

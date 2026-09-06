@@ -1,8 +1,7 @@
-import { Suspense, lazy, useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { Suspense, lazy, useState, useEffect, useMemo, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import IptvCoveragePage from '../iptv/IptvCoveragePage';
 import {
-  PlusIcon,
   CheckCircleIcon,
   XCircleIcon,
   SignalIcon,

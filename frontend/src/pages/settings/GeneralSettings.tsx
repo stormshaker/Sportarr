@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ServerIcon, ShieldCheckIcon, FolderArrowDownIcon, ArrowPathIcon, ChartBarIcon, DocumentDuplicateIcon, CheckIcon, TvIcon, ArrowDownTrayIcon, LinkIcon, ClipboardDocumentIcon } from '@heroicons/react/24/outline';
+import { ServerIcon, ShieldCheckIcon, FolderArrowDownIcon, ArrowPathIcon, ChartBarIcon, DocumentDuplicateIcon, CheckIcon, TvIcon, ArrowDownTrayIcon, ClipboardDocumentIcon } from '@heroicons/react/24/outline';
 import { toast } from 'sonner';
-import { apiGet, apiPost, apiPut, apiDelete } from '../../utils/api';
+import { apiGet, apiPost, apiPut } from '../../utils/api';
 import { runSettingsSave } from '../../hooks/useSettings';
 import SettingsHeader from '../../components/SettingsHeader';
 import { useUnsavedChanges } from '../../hooks/useUnsavedChanges';

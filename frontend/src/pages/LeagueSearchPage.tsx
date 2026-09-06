@@ -324,8 +324,6 @@ export default function LeagueSearchPage() {
       retentionDays,
       allowHighlights,
       sessionTypeQualityProfiles,
-      rootFolderId,
-      enableDvr
     }: {
       leagueId: number;
       monitoredTeamIds: string[];

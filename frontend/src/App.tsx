@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
-import { useState, useEffect, useRef, lazy, Suspense } from 'react';
+import { useEffect, useRef, lazy, Suspense } from 'react';
 import { toast } from 'sonner';
 import Layout from './components/Layout';
 import { ErrorBoundary } from './components/ErrorBoundary';

@@ -2,16 +2,11 @@ import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import {
   ClockIcon,
-  PlayCircleIcon,
-  CheckCircleIcon,
-  ExclamationTriangleIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   FunnelIcon,
-  CalendarDaysIcon,
   TvIcon,
   VideoCameraIcon,
-  MagnifyingGlassIcon,
   ArrowPathIcon,
   Cog6ToothIcon,
   InformationCircleIcon,

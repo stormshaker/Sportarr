@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef, Fragment } from 'react';
 import { toast } from 'sonner';
 import { Dialog, Transition } from '@headlessui/react';
-import { MagnifyingGlassIcon, XMarkIcon, CheckIcon, InformationCircleIcon } from '@heroicons/react/24/outline';
+import { MagnifyingGlassIcon, XMarkIcon, CheckIcon } from '@heroicons/react/24/outline';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiDelete, apiGet, apiPost } from '../utils/api';
 import { BUTTON_PRIMARY, BUTTON_SECONDARY } from '../utils/designTokens';

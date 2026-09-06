@@ -48,7 +48,7 @@ export default function LoginPage() {
       } else {
         setError('Invalid username or password');
       }
-    } catch (error) {
+    } catch {
       setError('An error occurred. Please try again.');
     } finally {
       setLoading(false);

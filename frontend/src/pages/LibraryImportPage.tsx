@@ -2,7 +2,6 @@ import { formatEventDate } from '../utils/timezone';
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import {
   FolderIcon,
-  MagnifyingGlassIcon,
   CheckCircleIcon,
   XCircleIcon,
   ExclamationCircleIcon,
