@@ -890,8 +890,8 @@ export default function TeamsPage() {
           </select>
         </div>
         <p className="mb-6 text-sm text-gray-500">
-          Showing {isLoadingTeams ? '...' : Math.min(filteredTeams.length, MAX_RENDERED_TEAMS)} of {filteredTeams.length} matching teams
-          {searchQuery && ` matching "${searchQuery}"`}
+          Showing {isLoadingTeams ? '...' : Math.min(filteredTeams.length, MAX_RENDERED_TEAMS)} of {filteredTeams.length}
+          {searchQuery ? ` teams matching "${searchQuery}"` : ` teams`}
           {selectedSport !== 'all' && ` in ${SPORT_FILTERS.find((sport) => sport.id === selectedSport)?.name}`}
           {filteredTeams.length > MAX_RENDERED_TEAMS && ' — search to narrow the list'}
         </p>
