@@ -1658,21 +1658,93 @@ app.MapGet("/api/search/available-tokens", (ILogger<Program> logger) =>
 });
 
 // API: Get all leagues from Sportarr API (cached)
-app.MapGet("/api/leagues/all", async (SportarrApiClient sportsDbClient, ILogger<Program> logger) =>
+// Optional q, sport and limit narrow the response server-side. Without them
+// this serves the whole catalog — 1,510 leagues and about 924 KB — which the
+// client then filters in the browser on every keystroke. All three are
+// additive: a caller that passes none gets exactly what it always did.
+app.MapGet("/api/leagues/all", async (HttpContext http, string? q, string? sport, int? limit, SportarrApiClient sportsDbClient, ILogger<Program> logger) =>
 {
     var results = await sportsDbClient.GetAllLeaguesAsync();
 
     if (results == null || !results.Any())
     {
         logger.LogWarning("[LEAGUES] No leagues found in cache");
-        return Results.Ok(new List<object>());
+        return Results.Ok(new List<SportarrLeagueDto>());
     }
 
-    logger.LogDebug("[LEAGUES] Returning {Count} leagues", results.Count);
-
     // Convert to DTO to ensure correct field names for frontend (strBadge, strLogo, etc.)
-    var dtos = results.Select(SportarrLeagueDto.FromLeague).ToList();
-    return Results.Ok(dtos);
+    IEnumerable<SportarrLeagueDto> matches = results.Select(SportarrLeagueDto.FromLeague);
+
+    if (!string.IsNullOrWhiteSpace(sport))
+    {
+        // Case-insensitive equality, not a substring test: the catalog ships
+        // the same sport with mixed casing, and a substring match would let
+        // "Football" pull in "Australian Football" too.
+        matches = matches.Where(l => string.Equals(l.StrSport, sport, StringComparison.OrdinalIgnoreCase));
+    }
+
+    if (!string.IsNullOrWhiteSpace(q))
+    {
+        var term = q.Trim();
+        matches = matches.Where(l =>
+            LeagueFieldContains(l.StrLeague, term) ||
+            LeagueFieldContains(l.StrLeagueAlternate, term) ||
+            LeagueFieldContains(l.StrSport, term) ||
+            LeagueFieldContains(l.StrCountry, term));
+    }
+
+    // Internal catalog records, e.g. "_Defunct Tennis Teams". The client
+    // hid these itself, which it cannot do once it stops receiving the full
+    // list.
+    matches = matches.Where(l =>
+    {
+        var name = (l.StrLeague ?? string.Empty).Trim();
+        return name.Length == 0 || (!name.StartsWith('_') && !name.EndsWith('_'));
+    });
+
+    var ordered = matches.OrderBy(l => l.StrLeague ?? string.Empty, StringComparer.OrdinalIgnoreCase).ToList();
+
+    // The caller needs the full match count to say "showing 200 of 1,510",
+    // which a truncated body can no longer tell it.
+    var matchedCount = ordered.Count;
+    http.Response.Headers["X-Total-Count"] = matchedCount.ToString();
+
+    var page = limit is > 0 ? ordered.Take(limit.Value).ToList() : ordered;
+
+    logger.LogDebug("[LEAGUES] Returning {Returned} of {Matched} leagues", page.Count, matchedCount);
+
+    return Results.Ok(page);
+});
+
+static bool LeagueFieldContains(string? value, string term) =>
+    !string.IsNullOrEmpty(value) && value.Contains(term, StringComparison.OrdinalIgnoreCase);
+
+// The sport chips on the Add League page used to be derived from the full
+// catalog the client held. Now that it only receives a filtered page, the
+// chip list has to come from somewhere that does not move when the filter
+// does — otherwise choosing a sport narrows the chips to that sport and
+// there is no way back.
+app.MapGet("/api/leagues/sports", async (SportarrApiClient sportsDbClient) =>
+{
+    var results = await sportsDbClient.GetAllLeaguesAsync();
+    if (results == null || !results.Any())
+    {
+        return Results.Ok(new List<string>());
+    }
+
+    // The catalog ships the same sport with inconsistent casing
+    // ("Motorsport" vs "MotorSport"), which a plain distinct would render as
+    // two identical chips. Group case-insensitively and keep the lexically
+    // first spelling so the displayed casing is stable between syncs.
+    var sports = results
+        .Select(l => l.Sport)
+        .Where(sport => !string.IsNullOrWhiteSpace(sport))
+        .GroupBy(sport => sport!.ToLowerInvariant())
+        .Select(g => g.OrderBy(sport => sport, StringComparer.Ordinal).First()!)
+        .OrderBy(sport => sport, StringComparer.OrdinalIgnoreCase)
+        .ToList();
+
+    return Results.Ok(sports);
 });
 
 // API: Search leagues from Sportarr API
