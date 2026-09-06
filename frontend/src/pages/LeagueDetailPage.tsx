@@ -2328,7 +2328,13 @@ export default function LeagueDetailPage() {
                             // never happens.
                             const isCancelled = status === 'CANCELLED' || status === 'CANCELED';
                             const isPostponed = status === 'POSTPONED';
-                            const isCompleted = hasFile || status === 'FT' || status === 'COMPLETED' || status === 'MATCH FINISHED' || (isPastEvent && (!status || status === 'NS' || status === 'NOT STARTED'));
+                            // 'SCHEDULED' belongs in the past-date fallback with
+                            // 'NS' / 'NOT STARTED': it is the pre-match status the
+                            // hub actually serves, and it is not always advanced
+                            // once a match finishes -- plenty of events carry a
+                            // final score while still reporting 'scheduled'. Without
+                            // it those render "Not Started" days after the result.
+                            const isCompleted = hasFile || status === 'FT' || status === 'COMPLETED' || status === 'MATCH FINISHED' || (isPastEvent && (!status || status === 'NS' || status === 'NOT STARTED' || status === 'SCHEDULED'));
                             const isLive = status === 'LIVE';
                             const hasParts = config?.enableMultiPartEpisodes && isFightingSport(event.sport) && eventHasMultiPart(event);
 
@@ -2707,7 +2713,10 @@ export default function LeagueDetailPage() {
                             const isCancelled = status === 'CANCELLED' || status === 'CANCELED';
                             const isPostponed = status === 'POSTPONED';
                             // Event is completed if: has file, OR explicit completed status, OR past date with unstarted/no status
-                            const isCompleted = event.hasFile || status === 'FT' || status === 'COMPLETED' || status === 'MATCH FINISHED' || (isPast && (!status || status === 'NS' || status === 'NOT STARTED'));
+                            // 'SCHEDULED' counts as unstarted here for the same reason
+                            // as in the event list above: the hub leaves it in place on
+                            // plenty of finished events, score and all.
+                            const isCompleted = event.hasFile || status === 'FT' || status === 'COMPLETED' || status === 'MATCH FINISHED' || (isPast && (!status || status === 'NS' || status === 'NOT STARTED' || status === 'SCHEDULED'));
                             const isLive = status === 'LIVE';
                             const isNotStarted = !isCompleted && !isLive && !isCancelled && !isPostponed;
 
