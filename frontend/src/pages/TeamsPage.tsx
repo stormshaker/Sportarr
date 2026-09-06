@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   ArrowPathIcon,
@@ -53,6 +53,13 @@ const MONITOR_OPTIONS = [
 ];
 
 const TABLE_ROW_HOVER = 'text-sm transition-colors hover:bg-gray-800/50';
+const TEAM_NAME_COLLATOR = new Intl.Collator(undefined, { sensitivity: 'base' });
+
+// A picker is for finding one team, not for scrolling past seventeen thousand.
+// Rendering the whole filtered set put a quarter of a million nodes on the
+// page and made every keystroke a multi-second freeze.
+const MAX_RENDERED_TEAMS = 200;
+
 const BADGE_RED = 'whitespace-nowrap rounded bg-red-900/30 px-1.5 py-0.5 text-xs text-red-400';
 const BADGE_GREEN = 'whitespace-nowrap rounded bg-green-900/30 px-1.5 py-0.5 text-xs text-green-400';
 const SCROLLABLE_LIST = 'max-h-60 overflow-y-auto';
@@ -197,6 +204,12 @@ export default function TeamsPage() {
     return ids;
   }, [followedTeams]);
 
+  // Typing re-runs the filter over every team the catalog holds — 17k of them
+  // on a normal install. Deferring the value lets React keep the input painting
+  // while the list catches up, instead of blocking the keystroke on the sort
+  // and re-render behind it.
+  const deferredSearchQuery = useDeferredValue(searchQuery);
+
   const filteredTeams = useMemo(() => {
     if (!Array.isArray(allTeams)) return [];
     let filtered = allTeams;
@@ -210,8 +223,8 @@ export default function TeamsPage() {
       );
     }
 
-    if (searchQuery.trim()) {
-      const query = searchQuery.toLowerCase();
+    if (deferredSearchQuery.trim()) {
+      const query = deferredSearchQuery.toLowerCase();
       filtered = filtered.filter((team) =>
         team.name?.toLowerCase().includes(query) ||
         team.shortName?.toLowerCase().includes(query) ||
@@ -225,8 +238,8 @@ export default function TeamsPage() {
         const name = team.name ?? '';
         return !name.startsWith('_') && !name.endsWith('_');
       })
-      .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
-  }, [allTeams, searchQuery, selectedSport]);
+      .sort((a, b) => TEAM_NAME_COLLATOR.compare(a.name ?? '', b.name ?? ''));
+  }, [allTeams, deferredSearchQuery, selectedSport]);
 
   const followTeamMutation = useMutation({
     mutationFn: async (team: Team) => apiClient.post<FollowedTeam>('/followed-teams', {
@@ -594,6 +607,8 @@ export default function TeamsPage() {
       }
     );
 
+    const renderedData = tableData.slice(0, MAX_RENDERED_TEAMS);
+
     const visibleColumnCount = TEAM_COLUMN_DEFS.filter((column) => isVisible(column.key)).length;
 
     return (
@@ -662,7 +677,7 @@ export default function TeamsPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-700">
-              {tableData.map((team) => {
+              {renderedData.map((team) => {
                 const isFollowed = team.externalId ? followedTeamIds.has(team.externalId) : false;
                 const followedTeam = team.externalId ? getFollowedTeam(team.externalId) : null;
                 const isExpanded = expandedTeamId === team.externalId;
@@ -875,9 +890,10 @@ export default function TeamsPage() {
           </select>
         </div>
         <p className="mb-6 text-sm text-gray-500">
-          Showing {isLoadingTeams ? '...' : filteredTeams.length} of {allTeams.length} teams
+          Showing {isLoadingTeams ? '...' : Math.min(filteredTeams.length, MAX_RENDERED_TEAMS)} of {filteredTeams.length} matching teams
           {searchQuery && ` matching "${searchQuery}"`}
           {selectedSport !== 'all' && ` in ${SPORT_FILTERS.find((sport) => sport.id === selectedSport)?.name}`}
+          {filteredTeams.length > MAX_RENDERED_TEAMS && ' — search to narrow the list'}
         </p>
 
         {isLoadingTeams && (
@@ -905,7 +921,7 @@ export default function TeamsPage() {
               renderCompactTable()
             ) : filteredTeams.length > 0 ? (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {filteredTeams.map((team) => {
+                {filteredTeams.slice(0, MAX_RENDERED_TEAMS).map((team) => {
                   const isFollowed = team.externalId ? followedTeamIds.has(team.externalId) : false;
                   const isExpanded = expandedTeamId === team.externalId;
                   const followedTeam = team.externalId ? getFollowedTeam(team.externalId) : null;
