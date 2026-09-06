@@ -556,7 +556,12 @@ app.MapGet("/api/teams/search/{query}", async (string query, SportarrApiClient s
 
 // API: Get all teams for supported sports (see TeamLeagueDiscoveryService.SupportedSports)
 // Used by the Add Team page to show all teams that can be followed
-app.MapGet("/api/teams/all", async (string? sports, bool? refresh, SportarrApiClient sportsDbClient, ILogger<Program> logger) =>
+// Optional q and limit narrow the response server-side. Without them this
+// serves the whole catalog, which on a normal install is 17k teams and
+// roughly 10 MB — several seconds before the picker can paint anything, for
+// a page whose entire purpose is finding one team. Both are additive: a
+// caller that passes neither gets exactly what it always did.
+app.MapGet("/api/teams/all", async (HttpContext http, string? sports, string? q, int? limit, bool? refresh, SportarrApiClient sportsDbClient, ILogger<Program> logger) =>
 {
     // Parse optional sports filter (comma-separated list)
     var sportsList = !string.IsNullOrEmpty(sports)
@@ -571,12 +576,45 @@ app.MapGet("/api/teams/all", async (string? sports, bool? refresh, SportarrApiCl
     if (results == null || !results.Any())
     {
         logger.LogWarning("[TEAMS ALL] No teams found for sports: {Sports}", sportsForLog);
-        return Results.Ok(new List<object>());
+        return Results.Ok(new List<Team>());
     }
 
-    logger.LogInformation("[TEAMS ALL] Found {Count} unique teams for sports: {Sports}", results.Count, sportsForLog);
-    return Results.Ok(results);
+    IEnumerable<Team> matches = results;
+
+    if (!string.IsNullOrWhiteSpace(q))
+    {
+        var term = q.Trim();
+        matches = matches.Where(team =>
+            Contains(team.Name, term) ||
+            Contains(team.ShortName, term) ||
+            Contains(team.AlternateName, term) ||
+            Contains(team.Country, term));
+    }
+
+    // Placeholder rows the catalog uses for grouping, e.g. "_No League
+    // Fighting". The client filtered these out itself, which it can no longer
+    // do once it stops receiving the whole list.
+    matches = matches.Where(team =>
+        string.IsNullOrEmpty(team.Name) || (!team.Name.StartsWith('_') && !team.Name.EndsWith('_')));
+
+    var ordered = matches.OrderBy(team => team.Name ?? string.Empty, StringComparer.OrdinalIgnoreCase).ToList();
+
+    // The caller needs the full match count to say "showing 200 of 1,340",
+    // which the truncated body can no longer tell it.
+    http.Response.Headers["X-Total-Count"] = ordered.Count.ToString();
+
+    var page = limit is > 0 ? ordered.Take(limit.Value).ToList() : ordered;
+
+    logger.LogInformation(
+        "[TEAMS ALL] {Returned} of {Matched} teams returned for sports: {Sports}{Query}",
+        page.Count, ordered.Count, sportsForLog,
+        string.IsNullOrWhiteSpace(q) ? "" : $" matching '{q}'");
+
+    return Results.Ok(page);
 });
+
+static bool Contains(string? value, string term) =>
+    !string.IsNullOrEmpty(value) && value.Contains(term, StringComparison.OrdinalIgnoreCase);
 
         return app;
     }
