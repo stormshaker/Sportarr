@@ -181,7 +181,7 @@ export default function AddLeagueModal({ league, isOpen, onClose, onAdd, isAddin
     staleTime: 5 * 60 * 1000,
   });
 
-  const teams: Team[] = teamsResponse || [];
+  const teams: Team[] = useMemo(() => teamsResponse || [], [teamsResponse]);
 
   // Fetch quality profiles
   const { data: qualityProfiles = [] } = useQuery({
@@ -231,7 +231,7 @@ export default function AddLeagueModal({ league, isOpen, onClose, onAdd, isAddin
     staleTime: 5 * 60 * 1000,
   });
 
-  const availableSessionTypes: string[] = sessionTypesResponse || [];
+  const availableSessionTypes: string[] = useMemo(() => sessionTypesResponse || [], [sessionTypesResponse]);
 
   // Fetch fighting event types for UFC-style leagues (PPV, Fight Night, DWCS)
   const { data: eventTypesResponse, isPending: eventTypesPending } = useQuery({
@@ -246,7 +246,7 @@ export default function AddLeagueModal({ league, isOpen, onClose, onAdd, isAddin
     staleTime: 5 * 60 * 1000,
   });
 
-  const availableEventTypes = eventTypesResponse || [];
+  const availableEventTypes = useMemo(() => eventTypesResponse || [], [eventTypesResponse]);
 
   // Fetch existing league settings if in edit mode
   // IMPORTANT: Use string for query key to match LeagueDetailPage's useParams (which returns strings)

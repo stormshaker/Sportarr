@@ -467,7 +467,7 @@ export default function LeagueDetailPage() {
   // event's season, scrolls its row into view, and pulses a highlight so
   // the click lands on the exact event instead of the top of the league.
   const [highlightedEventId, setHighlightedEventId] = useState<number | null>(null);
-  const seasonRows = seasonSummary?.seasons ?? [];
+  const seasonRows = useMemo(() => seasonSummary?.seasons ?? [], [seasonSummary]);
   const totalEventCount = seasonSummary?.totalEvents ?? 0;
 
   // Events arrive a season at a time, when that season is opened. useQueries

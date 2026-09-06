@@ -78,7 +78,6 @@ export default function FileMetadataEditModal({
       // edits actually translate into a non-empty request body. An empty
       // patch is the most common cause of "save toast appeared but nothing
       // changed" — the editor's local state never picked up the keystrokes.
-      // eslint-disable-next-line no-console
       console.log('[FileMetadataEdit] saving', { fileIds, isBulk, patch, initialValues, values });
 
       if (Object.keys(patch).length === 0) {
@@ -98,14 +97,12 @@ export default function FileMetadataEditModal({
         response = await apiClient.put(`/event-files/${fileIds[0]}`, patch);
         toast.success('File updated');
       }
-      // eslint-disable-next-line no-console
       console.log('[FileMetadataEdit] server response', response.data);
       onSaved?.(Array.isArray(response.data) ? response.data : [response.data]);
       onClose();
     } catch (err) {
       const detail = errorMessage(err, 'Save failed');
       toast.error(detail);
-      // eslint-disable-next-line no-console
       console.error('[FileMetadataEdit] save failed', err);
     } finally {
       setSaving(false);
