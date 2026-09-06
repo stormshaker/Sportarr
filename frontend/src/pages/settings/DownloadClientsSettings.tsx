@@ -7,6 +7,7 @@ import { runSettingsSave } from '../../hooks/useSettings';
 import SettingsHeader from '../../components/SettingsHeader';
 import { useUnsavedChanges } from '../../hooks/useUnsavedChanges';
 import TagSelector from '../../components/TagSelector';
+import { errorMessage } from '../../utils/errors';
 
 interface DownloadClientsSettingsProps {
   showAdvanced?: boolean;
@@ -681,9 +682,9 @@ export default function DownloadClientsSettings({ showAdvanced: _showAdvanced = 
           });
         }
       }
-    } catch (error: any) {
+    } catch (error) {
       console.error('Test failed:', error);
-      const result = { success: false, message: error.response?.data?.message || 'Connection test failed!' };
+      const result = { success: false, message: errorMessage(error, 'Connection test failed!') };
       setTestResult(result);
 
       // Show toast if testing from the list (not in modal)

@@ -3,6 +3,7 @@ import { PlusIcon, PencilIcon, TrashIcon, BellIcon, XMarkIcon, CheckCircleIcon }
 import { apiGet, apiPost, apiPut, apiDelete } from '../../utils/api';
 import SettingsHeader from '../../components/SettingsHeader';
 import TagSelector from '../../components/TagSelector';
+import { errorMessage } from '../../utils/errors';
 
 interface NotificationsSettingsProps {
   showAdvanced?: boolean;
@@ -466,8 +467,8 @@ export default function NotificationsSettings({ showAdvanced: _showAdvanced = fa
       } else {
         setTestResult({ success: false, message: data.message || 'Failed to send notification' });
       }
-    } catch (error: any) {
-      setTestResult({ success: false, message: error.message || 'Error testing notification' });
+    } catch (error) {
+      setTestResult({ success: false, message: errorMessage(error) || 'Error testing notification' });
     } finally {
       setTesting(false);
     }

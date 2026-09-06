@@ -16,6 +16,7 @@ import {
 import { useAuth } from '../contexts/useAuth';
 import apiClient from '../api/client';
 import FileBrowserModal from './FileBrowserModal';
+import { errorMessage } from '../utils/errors';
 
 /**
  * First-run setup guide. Walks a new install from nothing to a working setup in
@@ -438,8 +439,8 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
         }
       }
       return true;
-    } catch (err: any) {
-      toast.error('Could not save security settings', { description: err?.response?.data?.error || err?.message });
+    } catch (err) {
+      toast.error('Could not save security settings', { description: errorMessage(err) });
       return false;
     } finally {
       setBusy(false);
@@ -486,8 +487,8 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
       // editing a field, and Save then walked past it and finished onboarding
       // with no client at all.
       setDcFormTouched(true);
-    } catch (err: any) {
-      setDcTest({ ok: false, msg: err?.response?.data?.error || err?.message || 'Could not connect' });
+    } catch (err) {
+      setDcTest({ ok: false, msg: errorMessage(err, 'Could not connect') });
     } finally {
       setBusy(false);
     }
@@ -499,8 +500,8 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
     try {
       await apiClient.post('/indexer/test', buildIndexerPayload());
       setIxTest({ ok: true, msg: 'Connected' });
-    } catch (err: any) {
-      setIxTest({ ok: false, msg: err?.response?.data?.error || err?.message || 'Could not connect' });
+    } catch (err) {
+      setIxTest({ ok: false, msg: errorMessage(err, 'Could not connect') });
     } finally {
       setBusy(false);
     }
@@ -518,7 +519,7 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
       const id = qualityChoice === '4k' ? fourKProfileId : hdProfileId;
       if (id != null) {
         try { await apiClient.post(`/qualityprofile/${id}/set-default`); }
-        catch (err: any) { failures.push(`quality profile (${err?.response?.data?.error || err?.message || 'unknown error'})`); }
+        catch (err) { failures.push(`quality profile (${errorMessage(err, 'unknown error')})`); }
       }
       // 2) Import the recommended TRaSH size limits.
       try { await apiClient.post('/qualitydefinition/trash/import', {}); } catch { /* non-fatal */ }
@@ -531,8 +532,8 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
           media.standardFileFormat = preset.format;
           media.renameEpisodes = true;
           await apiClient.put('/settings', { ...settings, mediaManagementSettings: JSON.stringify(media) });
-        } catch (err: any) {
-          failures.push(`file naming (${err?.response?.data?.error || err?.message || 'unknown error'})`);
+        } catch (err) {
+          failures.push(`file naming (${errorMessage(err, 'unknown error')})`);
         }
       }
 
@@ -559,8 +560,8 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
     try {
       try {
         await apiClient.post('/rootfolder', { path: trimmed });
-      } catch (err: any) {
-        const msg = err?.response?.data?.error || err?.message || 'Could not create the folder';
+      } catch (err) {
+        const msg = errorMessage(err, 'Could not create the folder');
         if (!String(msg).toLowerCase().includes('already')) {
           toast.error('Could not set up the library folder', { description: msg });
           return false;
@@ -574,9 +575,9 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
             remotePath: rpRemote.trim(),
             localPath: rpLocal.trim(),
           });
-        } catch (err: any) {
+        } catch (err) {
           toast.error('Library folder set, but the remote path mapping failed', {
-            description: err?.response?.data?.error || err?.message,
+            description: errorMessage(err),
           });
         }
       }
@@ -620,9 +621,9 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
         setAddedClients((prev) => [...prev, { id: data?.id, label: `${payload.name} (${payload.host}:${payload.port})`, raw: data ?? payload }]);
       }
       return true;
-    } catch (err: any) {
+    } catch (err) {
       toast.error('Could not save the download client', {
-        description: err?.response?.data?.error || err?.message,
+        description: errorMessage(err),
       });
       return false;
     } finally {
@@ -678,9 +679,9 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
         setAddedIndexers((prev) => [...prev, { id: data?.id, label: payload.name, raw: data ?? payload }]);
       }
       return true;
-    } catch (err: any) {
+    } catch (err) {
       toast.error('Could not save the indexer', {
-        description: err?.response?.data?.error || err?.message,
+        description: errorMessage(err),
       });
       return false;
     } finally {
@@ -778,9 +779,9 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
               });
             }
             await apiClient.post('/epg/auto-map');
-          } catch (guideErr: any) {
+          } catch (guideErr) {
             toast.warning('Provider updated, but the guide could not be saved', {
-              description: guideErr?.response?.data?.error || guideErr?.message,
+              description: errorMessage(guideErr),
             });
           }
         }
@@ -790,8 +791,8 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
           : p)));
         toast.success('Provider updated');
         return true;
-      } catch (err: any) {
-        toast.error('Could not update the provider', { description: err?.response?.data?.error || err?.message });
+      } catch (err) {
+        toast.error('Could not update the provider', { description: errorMessage(err) });
         return false;
       } finally {
         setBusy(false);
@@ -828,9 +829,9 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
       }
       setAddedProviders((prev) => [...prev, { id: source.id, label: body.name, raw: { ...body, id: source.id } }]);
       return true;
-    } catch (err: any) {
+    } catch (err) {
       toast.error('Could not connect the provider', {
-        description: err?.response?.data?.error || err?.message,
+        description: errorMessage(err),
       });
       return false;
     } finally {

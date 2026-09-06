@@ -92,7 +92,7 @@ export async function apiGet(url: string): Promise<Response> {
 /**
  * Make an authenticated POST request
  */
-export async function apiPost(url: string, body: any): Promise<Response> {
+export async function apiPost(url: string, body: unknown): Promise<Response> {
   return apiRequest(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -103,7 +103,7 @@ export async function apiPost(url: string, body: any): Promise<Response> {
 /**
  * Make an authenticated PUT request
  */
-export async function apiPut(url: string, body: any): Promise<Response> {
+export async function apiPut(url: string, body: unknown): Promise<Response> {
   return apiRequest(url, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -121,7 +121,7 @@ export async function apiDelete(url: string): Promise<Response> {
 /**
  * Make an authenticated DELETE request with a JSON body
  */
-export async function apiDeleteWithBody(url: string, body: any): Promise<Response> {
+export async function apiDeleteWithBody(url: string, body: unknown): Promise<Response> {
   return apiRequest(url, {
     method: 'DELETE',
     headers: { 'Content-Type': 'application/json' },

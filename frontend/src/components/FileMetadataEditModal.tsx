@@ -4,6 +4,7 @@ import { XMarkIcon } from '@heroicons/react/24/outline';
 import { toast } from 'sonner';
 import apiClient from '../api/client';
 import FileMetadataEditor, { type FileMetadataEditorValues } from './FileMetadataEditor';
+import { errorMessage } from '../utils/errors';
 
 /**
  * Modal wrapper around <FileMetadataEditor> for the post-import edit flow.
@@ -94,11 +95,8 @@ export default function FileMetadataEditModal({
       console.log('[FileMetadataEdit] server response', response.data);
       onSaved?.(Array.isArray(response.data) ? response.data : [response.data]);
       onClose();
-    } catch (err: any) {
-      const detail = err?.response?.data?.error
-        ?? err?.response?.data?.detail
-        ?? err?.message
-        ?? 'Save failed';
+    } catch (err) {
+      const detail = errorMessage(err, 'Save failed');
       toast.error(detail);
       // eslint-disable-next-line no-console
       console.error('[FileMetadataEdit] save failed', err);

@@ -19,6 +19,7 @@ import apiClient from '../../api/client';
 import { apiGet } from '../../utils/api';
 import type { QualityProfile } from '../../types';
 import SettingsHeader from '../../components/SettingsHeader';
+import { errorMessage } from '../../utils/errors';
 
 // Naming preset types (same as MediaManagementSettings)
 interface NamingPreset {
@@ -310,7 +311,7 @@ export default function DvrSettingsPage() {
       if (data.videoBitrate > 0) {
         setGbPerHour(kbpsToGbPerHour(data.videoBitrate));
       }
-    } catch (err: any) {
+    } catch (err) {
       console.error('Failed to load DVR settings:', err);
     }
   };
@@ -325,7 +326,7 @@ export default function DvrSettingsPage() {
         const defaultProfile = data.find(p => p.isDefault) || data[0];
         setSelectedQualityProfileId(defaultProfile.id);
       }
-    } catch (err: any) {
+    } catch (err) {
       console.error('Failed to load user quality profiles:', err);
     }
   };
@@ -334,7 +335,7 @@ export default function DvrSettingsPage() {
     try {
       const { data } = await apiClient.get<HardwareAccelerationInfo[]>('/dvr/hardware-acceleration');
       setAvailableHwAccel(data);
-    } catch (err: any) {
+    } catch (err) {
       console.error('Failed to load hardware acceleration info:', err);
     }
   };
@@ -433,7 +434,7 @@ export default function DvrSettingsPage() {
         profileData
       );
       setScorePreview(data);
-    } catch (err: any) {
+    } catch (err) {
       console.error('Failed to load score preview:', err);
       setScorePreview(null);
     } finally {
@@ -484,8 +485,8 @@ export default function DvrSettingsPage() {
       } catch {
         setEffectivePath(null);
       }
-    } catch (err: any) {
-      toast.error('Failed to save settings', { description: err.message });
+    } catch (err) {
+      toast.error('Failed to save settings', { description: errorMessage(err) });
     } finally {
       setIsSavingSettings(false);
     }

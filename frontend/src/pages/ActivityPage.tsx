@@ -27,6 +27,7 @@ import { useCompactView } from '../hooks/useCompactView';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { BADGE_BLUE, BADGE_PURPLE, BUTTON_DESTRUCTIVE, BUTTON_ICON_DESTRUCTIVE, BUTTON_ICON_INFO, BUTTON_ICON_SECONDARY, BUTTON_ICON_SUCCESS, BUTTON_ICON_WARNING, BUTTON_INFO, BUTTON_SECONDARY, BUTTON_SUCCESS, BUTTON_WARNING } from '../utils/designTokens';
 import { formatRelativeDate } from '../utils/timezone';
+import { errorMessage } from '../utils/errors';
 
 type TabType = 'queue' | 'history' | 'blocklist' | 'grabHistory' | 'missing' | 'cutoffUnmet';
 
@@ -545,9 +546,9 @@ export default function ActivityPage() {
       setRegrabbing(id);
       await apiClient.post(`/grab-history/${id}/regrab`);
       loadGrabHistory();
-    } catch (error: any) {
+    } catch (error) {
       console.error('Failed to re-grab:', error);
-      alert(error.response?.data?.error || 'Failed to re-grab release');
+      alert(errorMessage(error, 'Failed to re-grab release'));
     } finally {
       setRegrabbing(null);
     }
@@ -564,9 +565,9 @@ export default function ActivityPage() {
     try {
       await apiClient.delete(`/events/${item.eventId}/files/${item.eventFileId}`);
       loadGrabHistory();
-    } catch (error: any) {
+    } catch (error) {
       console.error('Failed to delete file:', error);
-      alert(error.response?.data?.error || 'Failed to delete file');
+      alert(errorMessage(error, 'Failed to delete file'));
     }
   };
 
@@ -577,9 +578,9 @@ export default function ActivityPage() {
       const data = response.data;
       alert(`Re-grabbed ${data.regrabbed} releases. ${data.failed} failed.`);
       loadGrabHistory();
-    } catch (error: any) {
+    } catch (error) {
       console.error('Failed to bulk re-grab:', error);
-      alert(error.response?.data?.error || 'Failed to re-grab missing releases');
+      alert(errorMessage(error, 'Failed to re-grab missing releases'));
     } finally {
       setBulkRegrabbing(false);
     }
@@ -615,9 +616,9 @@ export default function ActivityPage() {
       setLoadingPackPreview(true);
       const response = await apiClient.get(`/pending-imports/${pendingImport.id}/pack-matches`);
       setPackMatches(response.data.matches || []);
-    } catch (error: any) {
+    } catch (error) {
       console.error('Failed to load pack matches:', error);
-      alert(error.response?.data?.error || 'Failed to load pack preview');
+      alert(errorMessage(error, 'Failed to load pack preview'));
       setPackPreviewImport(null);
     } finally {
       setLoadingPackPreview(false);
@@ -632,9 +633,9 @@ export default function ActivityPage() {
       alert(`Pack imported: ${data.filesImported} files imported, ${data.filesSkipped} skipped, ${data.filesDeleted} deleted`);
       setPackPreviewImport(null);
       loadQueue();
-    } catch (error: any) {
+    } catch (error) {
       console.error('Failed to import pack:', error);
-      alert(error.response?.data?.error || 'Failed to import pack');
+      alert(errorMessage(error, 'Failed to import pack'));
     } finally {
       setImportingPack(null);
     }
@@ -782,9 +783,9 @@ export default function ActivityPage() {
     try {
       await apiClient.post(`/queue/${item.id}/retry`);
       loadQueue();
-    } catch (error: any) {
+    } catch (error) {
       console.error('Failed to retry import:', error);
-      alert(error.response?.data?.error || 'Failed to retry import');
+      alert(errorMessage(error, 'Failed to retry import'));
     }
   };
 
