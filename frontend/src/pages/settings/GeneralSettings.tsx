@@ -1,8 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { ServerIcon, ShieldCheckIcon, FolderArrowDownIcon, ArrowPathIcon, ChartBarIcon, DocumentDuplicateIcon, CheckIcon, TvIcon, ArrowDownTrayIcon, LinkIcon, ClipboardDocumentIcon } from '@heroicons/react/24/outline';
+import { ServerIcon, ShieldCheckIcon, FolderArrowDownIcon, ArrowPathIcon, ChartBarIcon, DocumentDuplicateIcon, CheckIcon, TvIcon, ArrowDownTrayIcon, ClipboardDocumentIcon } from '@heroicons/react/24/outline';
 import { toast } from 'sonner';
-import { apiGet, apiPost, apiPut, apiDelete } from '../../utils/api';
+import { apiGet, apiPost, apiPut } from '../../utils/api';
 import { runSettingsSave } from '../../hooks/useSettings';
 import SettingsHeader from '../../components/SettingsHeader';
 import { useUnsavedChanges } from '../../hooks/useUnsavedChanges';
@@ -65,8 +64,21 @@ interface UpdateSettings {
   scriptPath: string;
 }
 
+// The parsed settings snapshot taken at load, which the unsaved-changes
+// check compares the current form against. Each section is a JSON blob the
+// API sends as a string, so the parsed shape is whatever that section holds.
+interface LoadedSettings {
+  host: HostSettings | null;
+  security: SecuritySettings | null;
+  proxy: ProxySettings | null;
+  logging: LoggingSettings | null;
+  analytics: AnalyticsSettings | null;
+  backup: BackupSettings | null;
+  // Only written on save; the load path does not parse an update section.
+  update?: UpdateSettings;
+}
+
 export default function GeneralSettings({ showAdvanced = false }: GeneralSettingsProps) {
-  const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [apiKeyCopied, setApiKeyCopied] = useState(false);
@@ -74,10 +86,10 @@ export default function GeneralSettings({ showAdvanced = false }: GeneralSetting
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
 
   // Track initial values to detect changes
-  const initialValues = useRef<any>(null);
+  const initialValues = useRef<LoadedSettings | null>(null);
 
   // Use unsaved changes hook
-  const { blockNavigation } = useUnsavedChanges(hasUnsavedChanges);
+  useUnsavedChanges(hasUnsavedChanges);
 
   // Host Settings
   const [hostSettings, setHostSettings] = useState<HostSettings>({

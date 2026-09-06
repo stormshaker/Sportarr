@@ -463,11 +463,12 @@ export default function SeasonSearchModal({
         case 'size':
           comparison = (a.size ?? 0) - (b.size ?? 0);
           break;
-        case 'peers':
+        case 'peers': {
           const peersA = (a.seeders ?? 0) + (a.leechers ?? 0);
           const peersB = (b.seeders ?? 0) + (b.leechers ?? 0);
           comparison = peersA - peersB;
           break;
+        }
         case 'language':
           comparison = (a.language || 'English').localeCompare(b.language || 'English');
           break;

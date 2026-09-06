@@ -22,6 +22,7 @@ import PageHeader from '../../components/PageHeader';
 import PageShell from '../../components/PageShell';
 import { useUISettings } from '../../hooks/useUISettings';
 import { formatDateInTimezone, formatTimeInTimezone, localInputToUtcIso } from '../../utils/timezone';
+import { errorMessage } from '../../utils/errors';
 
 
 // DVR Recording Types
@@ -216,8 +217,8 @@ export default function DvrRecordingsSettings() {
       setFailedCaptures(prev => prev.filter(c => !ids.includes(c.id)));
       await Promise.all([loadRecordings(), loadStats()]);
       toast.success(ids.length === 1 ? 'Capture removed' : `${ids.length} captures removed`, { description: `Freed ${formatFileSize(reclaimed)}` });
-    } catch (err: any) {
-      toast.error('Could not remove the capture', { description: err?.message });
+    } catch (err) {
+      toast.error('Could not remove the capture', { description: errorMessage(err) });
     }
   };
 
@@ -230,8 +231,8 @@ export default function DvrRecordingsSettings() {
       }
       const { data } = await apiClient.get<DvrRecording[]>('/dvr/recordings', { params });
       setRecordings(data);
-    } catch (err: any) {
-      setError(err.message || 'Failed to load recordings');
+    } catch (err) {
+      setError(errorMessage(err) || 'Failed to load recordings');
     } finally {
       setIsLoading(false);
     }
@@ -241,7 +242,7 @@ export default function DvrRecordingsSettings() {
     try {
       const { data } = await apiClient.get<DvrStats>('/dvr/stats');
       setStats(data);
-    } catch (err: any) {
+    } catch (err) {
       console.error('Failed to load DVR stats:', err);
     }
   };
@@ -252,7 +253,7 @@ export default function DvrRecordingsSettings() {
         params: { enabledOnly: true },
       });
       setChannels(data);
-    } catch (err: any) {
+    } catch (err) {
       console.error('Failed to load channels:', err);
     }
   };
@@ -265,7 +266,7 @@ export default function DvrRecordingsSettings() {
       // regardless of reality.
       const { data } = await apiClient.get<{ available: boolean; version?: string; path?: string }>('/dvr/ffmpeg/status');
       setFfmpegAvailable(data.available);
-    } catch (err: any) {
+    } catch (err) {
       // A request that never got an answer says nothing about whether FFmpeg
       // is installed. Recording it as absent turned a momentary blip into a
       // page that refused manual recording for the rest of the session and
@@ -276,7 +277,7 @@ export default function DvrRecordingsSettings() {
     }
   };
 
-  const handleFormChange = (field: keyof ScheduleFormData, value: any) => {
+  const handleFormChange = <K extends keyof ScheduleFormData>(field: K, value: ScheduleFormData[K]) => {
     setFormData(prev => ({ ...prev, [field]: value }));
   };
 
@@ -299,9 +300,9 @@ export default function DvrRecordingsSettings() {
       setFormData(defaultFormData);
       await loadStats();
       toast.success('Recording Scheduled', { description: `${formData.eventTitle} has been scheduled` });
-    } catch (err: any) {
-      setError(err.message || 'Failed to schedule recording');
-      toast.error('Failed to schedule recording', { description: err.message });
+    } catch (err) {
+      setError(errorMessage(err) || 'Failed to schedule recording');
+      toast.error('Failed to schedule recording', { description: errorMessage(err) });
     }
   };
 
@@ -315,8 +316,8 @@ export default function DvrRecordingsSettings() {
       } else {
         toast.error('Failed to start recording', { description: response.data.error });
       }
-    } catch (err: any) {
-      toast.error('Failed to start recording', { description: err.message });
+    } catch (err) {
+      toast.error('Failed to start recording', { description: errorMessage(err) });
     }
   };
 
@@ -330,19 +331,8 @@ export default function DvrRecordingsSettings() {
       } else {
         toast.error('Failed to stop recording', { description: response.data.error });
       }
-    } catch (err: any) {
-      toast.error('Failed to stop recording', { description: err.message });
-    }
-  };
-
-  const handleCancelRecording = async (id: number) => {
-    try {
-      await apiClient.post(`/dvr/recordings/${id}/cancel`);
-      await loadRecordings();
-      await loadStats();
-      toast.success('Recording Cancelled');
-    } catch (err: any) {
-      toast.error('Failed to cancel recording', { description: err.message });
+    } catch (err) {
+      toast.error('Failed to stop recording', { description: errorMessage(err) });
     }
   };
 
@@ -353,8 +343,8 @@ export default function DvrRecordingsSettings() {
       setShowDeleteConfirm(null);
       await loadStats();
       toast.success('Recording Deleted');
-    } catch (err: any) {
-      toast.error('Failed to delete recording', { description: err.message });
+    } catch (err) {
+      toast.error('Failed to delete recording', { description: errorMessage(err) });
     }
   };
 
@@ -392,8 +382,8 @@ export default function DvrRecordingsSettings() {
       } else {
         toast.success(`Deleted ${successCount} recordings`);
       }
-    } catch (err: any) {
-      toast.error('Failed to delete recordings', { description: err.message });
+    } catch (err) {
+      toast.error('Failed to delete recordings', { description: errorMessage(err) });
     }
   };
 
@@ -440,8 +430,8 @@ export default function DvrRecordingsSettings() {
       } else {
         toast.error('Failed to import recording', { description: response.data.error });
       }
-    } catch (err: any) {
-      toast.error('Failed to import recording', { description: err.message });
+    } catch (err) {
+      toast.error('Failed to import recording', { description: errorMessage(err) });
     }
   };
 
@@ -1297,7 +1287,7 @@ export default function DvrRecordingsSettings() {
                   <label className="block text-sm font-medium text-gray-300 mb-2">Import Mode</label>
                   <select
                     value={formData.importMode ?? ''}
-                    onChange={(e) => handleFormChange('importMode', e.target.value)}
+                    onChange={(e) => handleFormChange('importMode', e.target.value as ScheduleFormData['importMode'])}
                     className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-red-600"
                   >
                     <option value="">Leave in place (default)</option>

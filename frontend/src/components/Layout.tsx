@@ -28,7 +28,7 @@ import { Suspense, useState, useEffect } from 'react';
 import FooterStatusBar from './FooterStatusBar';
 import MobileTabBar from './MobileTabBar';
 import OnboardingWizard from './OnboardingWizard';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuth } from '../contexts/useAuth';
 import { SETTINGS_PAGES } from '../pages/settings/settingsPages';
 import { useResolvedTheme } from '../hooks/useTheme';
 
@@ -224,12 +224,6 @@ export default function Layout() {
       setNavTarget(item.path);
       navigate(item.path);
     }
-  };
-
-  const isActive = (path?: string, children?: { path: string }[]) => {
-    if (path) return navPath === path;
-    if (children) return children.some((child) => navPath === child.path);
-    return false;
   };
 
   // Auto-collapse dropdowns when navigating to a different top-level section (like Sonarr)

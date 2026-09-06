@@ -20,6 +20,8 @@ import { runSettingsSave } from '../../hooks/useSettings';
 import PageHeader from '../../components/PageHeader';
 import PageShell from '../../components/PageShell';
 import EpgSourcesPanel from '../../components/EpgSourcesPanel';
+import { errorMessage } from '../../utils/errors';
+import type { AxiosResponse } from 'axios';
 
 // IPTV Source Types
 type IptvSourceType = 'M3U' | 'Xtream';
@@ -121,7 +123,7 @@ function SubscriptionUrlsSection() {
     try {
       await navigator.clipboard.writeText(text);
       toast.success(`${label} copied to clipboard`);
-    } catch (error) {
+    } catch {
       toast.error('Failed to copy to clipboard');
     }
   };
@@ -381,8 +383,8 @@ export default function IptvSettings() {
       setIsLoading(true);
       const { data } = await apiClient.get<IptvSource[]>('/iptv/sources');
       setSources(data);
-    } catch (err: any) {
-      setError(err.message || 'Failed to load IPTV sources');
+    } catch (err) {
+      setError(errorMessage(err) || 'Failed to load IPTV sources');
     } finally {
       setIsLoading(false);
     }
@@ -418,7 +420,7 @@ export default function IptvSettings() {
       const offset = page * CHANNEL_PAGE_SIZE;
 
       // Only load stats and groups on first page
-      const requests: Promise<any>[] = [
+      const requests: Promise<AxiosResponse<unknown>>[] = [
         apiClient.get<IptvChannel[]>(`/iptv/sources/${sourceId}/channels`, {
           params: {
             sportsOnly: channelFilter === 'sports' ? true : undefined,
@@ -439,7 +441,9 @@ export default function IptvSettings() {
 
       const results = await Promise.all(requests);
       if (seq !== channelLoadSeq.current) return;
-      const channelsData = Array.isArray(results[0].data) ? results[0].data : [];
+      // Positions are fixed by how the array is built above: [0] is always the
+      // channel page, and [1]/[2] are the stats and groups added for page 0.
+      const channelsData = (Array.isArray(results[0].data) ? results[0].data : []) as IptvChannel[];
 
       if (reset) {
         setChannels(channelsData);
@@ -451,18 +455,18 @@ export default function IptvSettings() {
       setHasMoreChannels(channelsData.length === CHANNEL_PAGE_SIZE);
 
       if (page === 0 && results.length > 1) {
-        setChannelStats(results[1].data);
-        setGroups(Array.isArray(results[2].data) ? results[2].data : []);
+        setChannelStats(results[1].data as ChannelStats);
+        setGroups(Array.isArray(results[2].data) ? (results[2].data as string[]) : []);
       }
-    } catch (err: any) {
+    } catch (err) {
       if (seq !== channelLoadSeq.current) return;
-      toast.error('Failed to load channels', { description: err.message });
+      toast.error('Failed to load channels', { description: errorMessage(err) });
     } finally {
       if (seq === channelLoadSeq.current) setLoadingChannels(false);
     }
   };
 
-  const handleFormChange = (field: keyof SourceFormData, value: any) => {
+  const handleFormChange = <K extends keyof SourceFormData>(field: K, value: SourceFormData[K]) => {
     setFormData(prev => ({ ...prev, [field]: value }));
   };
 
@@ -511,9 +515,9 @@ export default function IptvSettings() {
             iptvSourceId: response.data.id,
           });
           setEpgRefreshKey(k => k + 1);
-        } catch (epgErr: any) {
+        } catch (epgErr) {
           // The playlist source is already created; don't fail the whole add over the guide.
-          const epgMsg = epgErr?.response?.data?.error || epgErr?.message || 'Unknown error';
+          const epgMsg = errorMessage(epgErr, 'Unknown error');
           toast.warning('Playlist added, but the guide source failed', { description: epgMsg });
         }
       }
@@ -522,10 +526,10 @@ export default function IptvSettings() {
       toast.success('Source Added', {
         description: `${formData.name} was added; channels are syncing in the background${guideUrl ? ' and its guide is being fetched' : ''}`,
       });
-    } catch (err: any) {
+    } catch (err) {
       // Surface the server's actual error (e.g. the real Xtream failure reason,
       // or a duplicate-source message) instead of axios's generic status text.
-      const msg = err?.response?.data?.error || err.message || 'Failed to add source';
+      const msg = errorMessage(err, 'Failed to add source');
       setError(msg);
       toast.error('Failed to add source', { description: msg });
     } finally {
@@ -557,8 +561,8 @@ export default function IptvSettings() {
       setEditingSource(null);
       setFormData(defaultFormData);
       toast.success('Source Updated', { description: `${formData.name} has been updated` });
-    } catch (err: any) {
-      const msg = err?.response?.data?.error || err.message || 'Failed to update source';
+    } catch (err) {
+      const msg = errorMessage(err, 'Failed to update source');
       setError(msg);
       toast.error('Failed to update source', { description: msg });
     } finally {
@@ -573,9 +577,9 @@ export default function IptvSettings() {
       setSources(prev => prev.filter(s => s.id !== id));
       setShowDeleteConfirm(null);
       toast.success('Source Deleted');
-    } catch (err: any) {
-      setError(err.message || 'Failed to delete source');
-      toast.error('Failed to delete source', { description: err.message });
+    } catch (err) {
+      setError(errorMessage(err) || 'Failed to delete source');
+      toast.error('Failed to delete source', { description: errorMessage(err) });
     }
   };
 
@@ -597,8 +601,8 @@ export default function IptvSettings() {
       setSources(prev => prev.filter(s => !selectedIds.has(s.id)));
       setSelectedIds(new Set());
       toast.success(`Deleted ${ids.length} source${ids.length === 1 ? '' : 's'}`);
-    } catch (err: any) {
-      const msg = err?.response?.data?.error || err.message || 'Failed to delete sources';
+    } catch (err) {
+      const msg = errorMessage(err, 'Failed to delete sources');
       setError(msg);
       toast.error('Failed to delete sources', { description: msg });
     } finally {
@@ -611,8 +615,8 @@ export default function IptvSettings() {
       const response = await apiClient.post<IptvSource>(`/iptv/sources/${source.id}/toggle`);
       setSources(prev => prev.map(s => s.id === source.id ? response.data : s));
       toast.success(response.data.isActive ? 'Source Enabled' : 'Source Disabled');
-    } catch (err: any) {
-      toast.error('Failed to toggle source', { description: err.message });
+    } catch (err) {
+      toast.error('Failed to toggle source', { description: errorMessage(err) });
     }
   };
 
@@ -642,8 +646,8 @@ export default function IptvSettings() {
       } else {
         toast.success('Everything synced', { description: summary });
       }
-    } catch (err: any) {
-      toast.error('Sync failed', { description: err.message });
+    } catch (err) {
+      toast.error('Sync failed', { description: errorMessage(err) });
     } finally {
       setIsSyncingAll(false);
     }
@@ -655,8 +659,8 @@ export default function IptvSettings() {
       const response = await apiClient.post<{ channelCount: number }>(`/iptv/sources/${sourceId}/sync`);
       await loadSources();
       toast.success('Channels Synced', { description: `Synced ${response.data.channelCount} channels` });
-    } catch (err: any) {
-      toast.error('Failed to sync channels', { description: err.message });
+    } catch (err) {
+      toast.error('Failed to sync channels', { description: errorMessage(err) });
     } finally {
       setSyncingSourceId(null);
     }
@@ -688,9 +692,9 @@ export default function IptvSettings() {
         setTestResult({ success: false, message: response.data.error || 'Connection failed' });
         toast.error('Test Failed', { description: response.data.error });
       }
-    } catch (err: any) {
-      setTestResult({ success: false, message: err.message || 'Connection test failed' });
-      toast.error('Test Failed', { description: err.message });
+    } catch (err) {
+      setTestResult({ success: false, message: errorMessage(err) || 'Connection test failed' });
+      toast.error('Test Failed', { description: errorMessage(err) });
     } finally {
       setIsTesting(false);
     }
@@ -716,8 +720,8 @@ export default function IptvSettings() {
       } else {
         toast.error('Channel Offline', { description: response.data.error });
       }
-    } catch (err: any) {
-      toast.error('Failed to test channel', { description: err.message });
+    } catch (err) {
+      toast.error('Failed to test channel', { description: errorMessage(err) });
     } finally {
       setTestingChannelId(null);
     }
@@ -836,7 +840,7 @@ export default function IptvSettings() {
                   type="password"
                   value={formData.password}
                   onChange={(e) => handleFormChange('password', e.target.value)}
-                  onFocus={(e) => {
+                  onFocus={() => {
                     // Clear the placeholder when user focuses the field to type a new password
                     if (formData.password === EXISTING_PASSWORD_PLACEHOLDER) {
                       handleFormChange('password', '');

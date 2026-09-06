@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { LockClosedIcon } from '@heroicons/react/24/outline';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuth } from '../contexts/useAuth';
 
 function normalizeAppPath(path: string): string {
   const urlBase = window.Sportarr?.urlBase || '';
@@ -48,7 +48,7 @@ export default function LoginPage() {
       } else {
         setError('Invalid username or password');
       }
-    } catch (error) {
+    } catch {
       setError('An error occurred. Please try again.');
     } finally {
       setLoading(false);

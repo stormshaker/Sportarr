@@ -16,7 +16,6 @@ import {
   TrashIcon,
   InformationCircleIcon,
   CloudArrowDownIcon,
-  CheckCircleIcon,
   ArchiveBoxIcon,
 } from '@heroicons/react/24/outline';
 import { apiPost, apiGet, apiDelete } from '../utils/api';

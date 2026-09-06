@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef, Fragment } from 'react';
 import { toast } from 'sonner';
 import { Dialog, Transition } from '@headlessui/react';
-import { MagnifyingGlassIcon, XMarkIcon, CheckIcon, InformationCircleIcon } from '@heroicons/react/24/outline';
+import { MagnifyingGlassIcon, XMarkIcon, CheckIcon } from '@heroicons/react/24/outline';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiDelete, apiGet, apiPost } from '../utils/api';
 import { BUTTON_PRIMARY, BUTTON_SECONDARY } from '../utils/designTokens';
@@ -27,7 +27,7 @@ interface Team {
   strTeamShort?: string;
 }
 
-interface League {
+export interface League {
   idLeague: string;
   strLeague: string;
   strSport: string;
@@ -93,6 +93,13 @@ interface AddLeagueModalProps {
 // Sport-classification helpers live in utils/leagueSportRules so the modal's
 // display logic and the league pages' save logic share one source of truth.
 
+// A league-to-team join row: the team is only present when the row still
+// resolves to one, which is why the filter checks for it.
+interface MonitoredTeamLink {
+  monitored: boolean;
+  team?: { externalId: string };
+}
+
 export default function AddLeagueModal({ league, isOpen, onClose, onAdd, isAdding, editMode = false, leagueId }: AddLeagueModalProps) {
   const [selectedTeamIds, setSelectedTeamIds] = useState<Set<string>>(new Set());
   const [selectAll, setSelectAll] = useState(false);
@@ -119,8 +126,8 @@ export default function AddLeagueModal({ league, isOpen, onClose, onAdd, isAddin
   const [searchForCutoffUnmetEvents, setSearchForCutoffUnmetEvents] = useState(false);
   // For fighting sports: default to all parts selected
   const [monitoredParts, setMonitoredParts] = useState<Set<string>>(new Set());
-  const [selectAllParts, setSelectAllParts] = useState(false);
-  const [applyMonitoredPartsToEvents, setApplyMonitoredPartsToEvents] = useState(true);
+  const [, setSelectAllParts] = useState(false);
+  const [applyMonitoredPartsToEvents] = useState(true);
   // For motorsports: session types to monitor (default to all selected)
   // Note: selectAllSessionTypes starts false to match empty Set, will be set true when availableSessionTypes loads
   const [monitoredSessionTypes, setMonitoredSessionTypes] = useState<Set<string>>(new Set());
@@ -405,8 +412,8 @@ export default function AddLeagueModal({ league, isOpen, onClose, onAdd, isAddin
       initializedTeamsRef.current = true;
 
       const monitoredExternalIds = existingLeague.monitoredTeams
-        .filter((mt: any) => mt.monitored && mt.team)
-        .map((mt: any) => mt.team.externalId);
+        .filter((mt: MonitoredTeamLink) => mt.monitored && mt.team)
+        .map((mt: MonitoredTeamLink) => mt.team!.externalId);
       setSelectedTeamIds(new Set(monitoredExternalIds));
       setSelectAll(monitoredExternalIds.length === teams.length);
     }
@@ -667,19 +674,6 @@ export default function AddLeagueModal({ league, isOpen, onClose, onAdd, isAddin
     });
   };
 
-  const handleSelectAllParts = () => {
-    if (!league?.strSport) return;
-    const availableParts = getPartOptions(league.strSport);
-
-    if (selectAllParts) {
-      setMonitoredParts(new Set());
-      setSelectAllParts(false);
-    } else {
-      setMonitoredParts(new Set(availableParts));
-      setSelectAllParts(true);
-    }
-  };
-
   const handleSessionTypeToggle = (sessionType: string) => {
     setMonitoredSessionTypes(prev => {
       const newSet = new Set(prev);
@@ -869,7 +863,6 @@ export default function AddLeagueModal({ league, isOpen, onClose, onAdd, isAddin
   const selectedCount = selectedTeamIds.size;
   const logoUrl = league?.strBadge || league?.strLogo;
   const availableParts = league ? getPartOptions(league.strSport) : [];
-  const selectedPartsCount = monitoredParts.size;
   const selectedSessionTypesCount = monitoredSessionTypes.size;
 
   // Per-type quality dropdowns name the profile the league default resolves

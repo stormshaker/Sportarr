@@ -2,16 +2,11 @@ import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import {
   ClockIcon,
-  PlayCircleIcon,
-  CheckCircleIcon,
-  ExclamationTriangleIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   FunnelIcon,
-  CalendarDaysIcon,
   TvIcon,
   VideoCameraIcon,
-  MagnifyingGlassIcon,
   ArrowPathIcon,
   Cog6ToothIcon,
   InformationCircleIcon,
@@ -23,6 +18,7 @@ import PageShell from '../../components/PageShell';
 import { useUISettings } from '../../hooks/useUISettings';
 import { useMediaQuery } from '../../hooks/useMediaQuery';
 import { formatTimeInTimezone, formatDateInTimezone } from '../../utils/timezone';
+import { errorMessage } from '../../utils/errors';
 
 // Types
 interface TvGuideProgram {
@@ -238,9 +234,9 @@ export default function TvGuidePage() {
       await apiClient.post(`/epg/programs/${program.id}/schedule-dvr`);
       toast.success(`DVR scheduled for "${program.title}"`);
       await loadGuideDataRef.current();
-    } catch (error: any) {
+    } catch (error) {
       console.error('Failed to schedule DVR:', error);
-      toast.error(error.response?.data?.error || 'Failed to schedule DVR');
+      toast.error(errorMessage(error, 'Failed to schedule DVR'));
     }
   };
 

@@ -17,15 +17,17 @@ import RefreshScopeModal, { type RefreshScope } from '../components/RefreshScope
 import { useSearchQueueStatus, useDownloadQueue, useTasks } from '../api/hooks';
 import { useUISettings } from '../hooks/useUISettings';
 import { useCompactView } from '../hooks/useCompactView';
-import { formatDateInTimezone, formatEventDate } from '../utils/timezone';
+import { formatEventDate } from '../utils/timezone';
 import { getRefetchIntervalWithBackoff } from '../utils/queryBackoff';
-import { PAGE_PADDING, BUTTON_PRIMARY, BUTTON_SECONDARY, BUTTON_SUCCESS, BUTTON_INFO, BUTTON_DESTRUCTIVE } from '../utils/designTokens';
+import { PAGE_PADDING, BUTTON_PRIMARY, BUTTON_SECONDARY, BUTTON_SUCCESS } from '../utils/designTokens';
 
 // The three league header buttons share one grid cell each, so they stay the
 // same size. A phone gets a smaller label and tighter padding rather than a
 // row that runs off the card.
 const HEADER_ACTION = 'w-full min-w-0 max-sm:gap-1 max-sm:px-1.5 max-sm:text-[11px]';
 import { isFightingSport, isTeamlessSport, usesFightingEventTypes } from '../utils/leagueSportRules';
+import { errorMessage } from '../utils/errors';
+import type { League as AddLeagueModalLeague } from '../components/AddLeagueModal';
 
 // Type for the league prop passed to AddLeagueModal
 interface ModalLeagueData {
@@ -934,9 +936,8 @@ export default function LeagueDetailPage() {
       await queryClient.invalidateQueries({ queryKey: ['leagues'] });
       navigate('/leagues');
     },
-    onError: (error: any) => {
-      const errorMessage = error.response?.data?.error || 'Failed to delete league';
-      toast.error(errorMessage);
+    onError: (error: unknown) => {
+      toast.error(errorMessage(error, 'Failed to delete league'));
     },
   });
 
@@ -972,8 +973,8 @@ export default function LeagueDetailPage() {
       await queryClient.refetchQueries({ queryKey: ['leagues'] });
       toast.success(data.message || 'File deleted');
     },
-    onError: (error: any) => {
-      toast.error(error.response?.data?.detail || 'Failed to delete file');
+    onError: (error: unknown) => {
+      toast.error(errorMessage(error, 'Failed to delete file'));
     },
   });
 
@@ -997,7 +998,7 @@ export default function LeagueDetailPage() {
 
 
   const handleEditLeagueSettings = (
-    league: any,
+    league: AddLeagueModalLeague,
     monitoredTeamIds: string[],
     monitorType: string,
     qualityProfileId: number | null,
@@ -2642,8 +2643,6 @@ export default function LeagueDetailPage() {
                       <div className="divide-y divide-red-900/30">
                         {visibleSeasonEvents.map(event => {
                 const hasFile = event.hasFile;
-                const eventDate = new Date(event.eventDate);
-                const isPast = eventDate < new Date();
 
                 return (
                   <div

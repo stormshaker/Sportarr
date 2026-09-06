@@ -17,7 +17,7 @@ export default function SystemPage() {
       await navigator.clipboard.writeText(btcAddress);
       setBtcCopied(true);
       setTimeout(() => setBtcCopied(false), 2000);
-    } catch (err) {
+    } catch {
       // Fallback for older browsers or non-secure contexts. Whether it worked
       // is the return value, and ignoring it meant the page said "Copied!"
       // when nothing had been copied. Someone pasting an old clipboard could
@@ -70,7 +70,7 @@ export default function SystemPage() {
       await navigator.clipboard.writeText(systemInfo);
       setInfoCopied(true);
       setTimeout(() => setInfoCopied(false), 2000);
-    } catch (err) {
+    } catch {
       // Fallback for older browsers or non-secure contexts
       const textArea = document.createElement('textarea');
       textArea.value = systemInfo;

@@ -55,6 +55,18 @@ interface ImportReturn {
   fileName: string;
 }
 
+// A league already in the library, as /api/leagues returns it.
+interface UserLeague {
+  id: number;
+  externalId?: string;
+  name?: string;
+  monitored?: boolean;
+  monitorType?: string;
+  qualityProfileId?: number | null;
+  logoUrl?: string;
+  eventCount?: number;
+}
+
 const MAX_RENDERED_LEAGUES = 200;
 
 export default function LeagueSearchPage() {
@@ -64,7 +76,7 @@ export default function LeagueSearchPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedSport, setSelectedSport] = useState('all');
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [editMode, setEditMode] = useState(false);
+  const [, setEditMode] = useState(false);
   const [hoveredLeagueId, setHoveredLeagueId] = useState<string | null>(null);
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
   const compactView = useCompactView();
@@ -115,7 +127,7 @@ export default function LeagueSearchPage() {
   // Create a map of added leagues by external ID (includes logo URLs from database)
   const addedLeaguesMap = useMemo(() => {
     const map = new Map<string, AddedLeagueInfo & { logoUrl?: string }>();
-    userLeagues.forEach((league: any) => {
+    (userLeagues as UserLeague[]).forEach((league) => {
       if (league.externalId) {
         map.set(league.externalId, {
           id: league.id,
@@ -324,8 +336,6 @@ export default function LeagueSearchPage() {
       retentionDays,
       allowHighlights,
       sessionTypeQualityProfiles,
-      rootFolderId,
-      enableDvr
     }: {
       leagueId: number;
       monitoredTeamIds: string[];
@@ -489,7 +499,7 @@ export default function LeagueSearchPage() {
 
   // Helper to open delete confirmation with stable data
   const openDeleteModal = (leagueId: number, leagueName: string) => {
-    const userLeague = userLeagues.find((l: any) => l.id === leagueId);
+    const userLeague = (userLeagues as UserLeague[]).find((l) => l.id === leagueId);
     const eventCount = userLeague?.eventCount || 0;
     deleteModalDataRef.current = { leagueId, leagueName, eventCount };
     setIsDeleteConfirmOpen(true);
@@ -664,14 +674,14 @@ export default function LeagueSearchPage() {
                       <button
                         onMouseEnter={() => setHoveredLeagueId(league.idLeague)}
                         onMouseLeave={() => setHoveredLeagueId(null)}
-                        onClick={(e) => { e.stopPropagation(); addedLeagueInfo && openDeleteModal(addedLeagueInfo.id, league.strLeague); }}
+                        onClick={(e) => { e.stopPropagation(); if (addedLeagueInfo) openDeleteModal(addedLeagueInfo.id, league.strLeague); }}
                         className="rounded-lg border border-green-700 px-4 py-2 text-sm font-medium text-green-400 transition-colors hover:border-red-700 hover:bg-red-900/30 hover:text-red-300"
                         title="Remove from Library"
                       >
                         {hoveredLeagueId === league.idLeague ? 'Remove' : 'Added'}
                       </button>
                       <button
-                        onClick={(e) => { e.stopPropagation(); addedLeagueInfo && openEditModal(league, addedLeagueInfo.id); }}
+                        onClick={(e) => { e.stopPropagation(); if (addedLeagueInfo) openEditModal(league, addedLeagueInfo.id); }}
                         className={BUTTON_INFO}
                         title="Edit League"
                       >
@@ -860,7 +870,7 @@ export default function LeagueSearchPage() {
                               onMouseLeave={() => setHoveredLeagueId(null)}
                               onClick={(e) => {
                                 e.stopPropagation();
-                                addedLeagueInfo && openDeleteModal(addedLeagueInfo.id, league.strLeague);
+                                if (addedLeagueInfo) openDeleteModal(addedLeagueInfo.id, league.strLeague);
                               }}
                               className={`flex-1 py-2 rounded-lg font-medium border transition-all flex items-center justify-center gap-2 ${
                                 hoveredLeagueId === league.idLeague
@@ -874,7 +884,7 @@ export default function LeagueSearchPage() {
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
-                                addedLeagueInfo && openEditModal(league, addedLeagueInfo.id);
+                                if (addedLeagueInfo) openEditModal(league, addedLeagueInfo.id);
                               }}
                               className="px-4 py-2 rounded-lg font-medium bg-blue-600 hover:bg-blue-700 text-white transition-colors"
                             >

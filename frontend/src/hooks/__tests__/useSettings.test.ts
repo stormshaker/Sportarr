@@ -1,12 +1,26 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { renderHook, waitFor } from '@testing-library/react';
 import { useSettings } from '../useSettings';
+import { getApiKey } from '../../utils/api';
 
 // Mock fetch globally
 const mockFetch = vi.fn();
 (globalThis as unknown as { fetch: typeof fetch }).fetch = mockFetch;
 
 describe('useSettings', () => {
+  beforeAll(async () => {
+    // apiRequest resolves the API key from /initialize.json on first use and
+    // caches it for the lifetime of the module. Priming it here keeps each
+    // test's mocked fetch sequence covering only its own request, which is
+    // what they were written against.
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ apiKey: 'test-api-key' }),
+    });
+    await getApiKey();
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
   });
@@ -18,6 +32,7 @@ describe('useSettings', () => {
   it('should initialize with default value', () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
+      headers: { get: () => 'application/json' },
       json: async () => ({
         id: 1,
         hostSettings: '{}',
@@ -42,6 +57,7 @@ describe('useSettings', () => {
 
     mockFetch.mockResolvedValueOnce({
       ok: true,
+      headers: { get: () => 'application/json' },
       json: async () => ({
         id: 1,
         hostSettings: JSON.stringify(mockHostSettings),
@@ -57,7 +73,7 @@ describe('useSettings', () => {
       expect(result.current[2]).toBe(false); // loading finished
     });
 
-    expect(mockFetch).toHaveBeenCalledWith('/api/settings');
+    expect(mockFetch).toHaveBeenCalledWith('/api/settings', expect.objectContaining({ method: 'GET' }));
     expect(result.current[0]).toEqual(mockHostSettings);
   });
 
@@ -97,6 +113,7 @@ describe('useSettings', () => {
     // Mock initial fetch
     mockFetch.mockResolvedValueOnce({
       ok: true,
+      headers: { get: () => 'application/json' },
       json: async () => currentSettings,
     });
 
@@ -111,12 +128,14 @@ describe('useSettings', () => {
     // Mock fetch for save operation (fetch current settings)
     mockFetch.mockResolvedValueOnce({
       ok: true,
+      headers: { get: () => 'application/json' },
       json: async () => currentSettings,
     });
 
     // Mock save response
     mockFetch.mockResolvedValueOnce({
       ok: true,
+      headers: { get: () => 'application/json' },
       json: async () => ({ ...currentSettings, hostSettings: JSON.stringify(newHostSettings) }),
     });
 
@@ -131,10 +150,8 @@ describe('useSettings', () => {
     expect(putCalls.length).toBeGreaterThan(0);
 
     const lastPutCall = putCalls[putCalls.length - 1];
-    expect(lastPutCall[1]).toMatchObject({
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-    });
+    expect(lastPutCall[1]).toMatchObject({ method: 'PUT' });
+    expect(new Headers(lastPutCall[1].headers).get('content-type')).toBe('application/json');
     // The body contains the full settings object with hostSettings as a stringified JSON
     // So we need to check for the escaped version
     const bodyObj = JSON.parse(lastPutCall[1].body);
@@ -152,6 +169,7 @@ describe('useSettings', () => {
     // Mock initial fetch
     mockFetch.mockResolvedValueOnce({
       ok: true,
+      headers: { get: () => 'application/json' },
       json: async () => ({
         id: 1,
         hostSettings: JSON.stringify({ port: 1867 }),
@@ -181,6 +199,7 @@ describe('useSettings', () => {
   it('should handle malformed JSON gracefully', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
+      headers: { get: () => 'application/json' },
       json: async () => ({
         id: 1,
         hostSettings: 'invalid json{',
@@ -204,6 +223,7 @@ describe('useSettings', () => {
   it('should handle 404 response', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: false,
+      headers: { get: () => 'application/json' },
       status: 404,
       json: async () => ({}),
     });
@@ -262,6 +282,7 @@ describe('useSettings', () => {
     // Mock initial fetch
     mockFetch.mockResolvedValueOnce({
       ok: true,
+      headers: { get: () => 'application/json' },
       json: async () => currentSettings,
     });
 
@@ -276,11 +297,13 @@ describe('useSettings', () => {
     // Mock fetch for save
     mockFetch.mockResolvedValueOnce({
       ok: true,
+      headers: { get: () => 'application/json' },
       json: async () => currentSettings,
     });
 
     mockFetch.mockResolvedValueOnce({
       ok: true,
+      headers: { get: () => 'application/json' },
       json: async () => currentSettings,
     });
 
@@ -301,6 +324,7 @@ describe('useSettings', () => {
   it('should handle empty settings key', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
+      headers: { get: () => 'application/json' },
       json: async () => ({
         id: 1,
         hostSettings: '',

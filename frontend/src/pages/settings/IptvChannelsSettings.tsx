@@ -1,8 +1,7 @@
-import { Suspense, lazy, useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { Suspense, lazy, useState, useEffect, useMemo, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import IptvCoveragePage from '../iptv/IptvCoveragePage';
 import {
-  PlusIcon,
   CheckCircleIcon,
   XCircleIcon,
   SignalIcon,
@@ -26,6 +25,7 @@ import { toast } from 'sonner';
 import apiClient from '../../api/client';
 import PageHeader from '../../components/PageHeader';
 import PageShell from '../../components/PageShell';
+import { errorMessage } from '../../utils/errors';
 
 // Types
 interface IptvChannel {
@@ -118,7 +118,7 @@ export default function IptvChannelsSettings() {
   const [leagues, setLeagues] = useState<League[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [totalChannels, setTotalChannels] = useState(0);
+  const [, setTotalChannels] = useState(0);
   const [currentPage, setCurrentPage] = useState(0);
   const [hasMore, setHasMore] = useState(true);
 
@@ -209,8 +209,8 @@ export default function IptvChannelsSettings() {
       } else {
         setTotalChannels(prev => reset ? data.length : prev + data.length);
       }
-    } catch (err: any) {
-      setError(err.message || 'Failed to load channels');
+    } catch (err) {
+      setError(errorMessage(err) || 'Failed to load channels');
     } finally {
       setIsLoading(false);
     }
@@ -220,7 +220,7 @@ export default function IptvChannelsSettings() {
     try {
       const { data } = await apiClient.get<League[]>('/leagues');
       setLeagues(Array.isArray(data) ? data : []);
-    } catch (err: any) {
+    } catch (err) {
       console.error('Failed to load leagues:', err);
       setLeagues([]);
     }
@@ -235,7 +235,7 @@ export default function IptvChannelsSettings() {
       ]);
       setAvailableCountries(Array.isArray(countriesRes.data) ? countriesRes.data : []);
       setAvailableGroups(Array.isArray(groupsRes.data) ? groupsRes.data : []);
-    } catch (err: any) {
+    } catch (err) {
       console.error('Failed to load filter options:', err);
       setAvailableCountries([]);
       setAvailableGroups([]);
@@ -299,8 +299,8 @@ export default function IptvChannelsSettings() {
       const { data } = await apiClient.post<IptvChannel>(`/iptv/channels/${channel.id}/toggle`);
       setChannels((prev) => prev.map((c) => (c.id === channel.id ? data : c)));
       toast.success(data.isEnabled ? 'Channel Enabled' : 'Channel Disabled');
-    } catch (err: any) {
-      toast.error('Failed to toggle channel', { description: err.message });
+    } catch (err) {
+      toast.error('Failed to toggle channel', { description: errorMessage(err) });
     }
   };
 
@@ -323,8 +323,8 @@ export default function IptvChannelsSettings() {
       } else {
         toast.error('Channel Offline', { description: data.error });
       }
-    } catch (err: any) {
-      toast.error('Failed to test channel', { description: err.message });
+    } catch (err) {
+      toast.error('Failed to test channel', { description: errorMessage(err) });
     } finally {
       setTestingChannelIds((prev) => {
         const newSet = new Set(prev);
@@ -341,8 +341,8 @@ export default function IptvChannelsSettings() {
       });
       setChannels((prev) => prev.map((c) => (c.id === channel.id ? data : c)));
       toast.success(data.isSportsChannel ? 'Marked as Sports Channel' : 'Unmarked as Sports Channel');
-    } catch (err: any) {
-      toast.error('Failed to update channel', { description: err.message });
+    } catch (err) {
+      toast.error('Failed to update channel', { description: errorMessage(err) });
     }
   };
 
@@ -359,8 +359,8 @@ export default function IptvChannelsSettings() {
       );
       setSelectedIds(new Set());
       toast.success(`${enabled ? 'Enabled' : 'Disabled'} ${channelIds.length} channels`);
-    } catch (err: any) {
-      toast.error('Bulk operation failed', { description: err.message });
+    } catch (err) {
+      toast.error('Bulk operation failed', { description: errorMessage(err) });
     }
   };
 
@@ -393,8 +393,8 @@ export default function IptvChannelsSettings() {
       toast.success(`Tested ${channelIds.length} channels`, {
         description: `${onlineCount} online, ${offlineCount} offline`,
       });
-    } catch (err: any) {
-      toast.error('Bulk test failed', { description: err.message });
+    } catch (err) {
+      toast.error('Bulk test failed', { description: errorMessage(err) });
     } finally {
       setBulkTesting(false);
     }
@@ -419,8 +419,8 @@ export default function IptvChannelsSettings() {
       } else {
         toast.error('Auto-mapping failed');
       }
-    } catch (err: any) {
-      toast.error('Auto-mapping failed', { description: err.message });
+    } catch (err) {
+      toast.error('Auto-mapping failed', { description: errorMessage(err) });
     } finally {
       setIsAutoMapping(false);
     }
@@ -441,8 +441,8 @@ export default function IptvChannelsSettings() {
           description: 'All channels are already mapped, or no matching EPG channels were found. If you have not yet, sync an EPG source first from the TV Guide page.',
         });
       }
-    } catch (err: any) {
-      toast.error('EPG auto-mapping failed', { description: err.message });
+    } catch (err) {
+      toast.error('EPG auto-mapping failed', { description: errorMessage(err) });
     } finally {
       setIsAutoMappingEpg(false);
     }
@@ -455,8 +455,8 @@ export default function IptvChannelsSettings() {
       toast.success('EPG mapping cleared', {
         description: `${channel.name} can now be auto-mapped again`,
       });
-    } catch (err: any) {
-      toast.error('Failed to clear EPG mapping', { description: err.message });
+    } catch (err) {
+      toast.error('Failed to clear EPG mapping', { description: errorMessage(err) });
     }
   };
 
@@ -549,8 +549,8 @@ export default function IptvChannelsSettings() {
       toast.success('Team preference saved', {
         description: `This channel is now preferred for that team's recordings`,
       });
-    } catch (err: any) {
-      toast.error('Failed to save team preference', { description: err.message });
+    } catch (err) {
+      toast.error('Failed to save team preference', { description: errorMessage(err) });
     }
   };
 
@@ -561,8 +561,8 @@ export default function IptvChannelsSettings() {
     try {
       await apiClient.delete(`/iptv/channels/${mappingChannel.id}/team-mappings/${teamId}`);
       setChannelTeamMappings((prev) => prev.filter((m) => m.teamId !== teamId));
-    } catch (err: any) {
-      toast.error('Failed to remove team preference', { description: err.message });
+    } catch (err) {
+      toast.error('Failed to remove team preference', { description: errorMessage(err) });
     }
   };
 
@@ -579,8 +579,8 @@ export default function IptvChannelsSettings() {
       });
       setEpgPickerChannel(null);
       await loadChannels(0, true);
-    } catch (err: any) {
-      toast.error('Failed to map EPG channel', { description: err.message });
+    } catch (err) {
+      toast.error('Failed to map EPG channel', { description: errorMessage(err) });
     }
   };
 
@@ -597,8 +597,8 @@ export default function IptvChannelsSettings() {
           description: data.message,
         });
       }
-    } catch (err: any) {
-      toast.error('Failed to update preferred channels', { description: err.message });
+    } catch (err) {
+      toast.error('Failed to update preferred channels', { description: errorMessage(err) });
     }
   };
 
@@ -609,8 +609,8 @@ export default function IptvChannelsSettings() {
       await apiClient.post(`/iptv/channels/${channel.id}/favorite`, { isFavorite: newStatus });
       setChannels((prev) => prev.map((c) => (c.id === channel.id ? { ...c, isFavorite: newStatus } : c)));
       toast.success(newStatus ? 'Added to Favorites' : 'Removed from Favorites');
-    } catch (err: any) {
-      toast.error('Failed to update favorite status', { description: err.message });
+    } catch (err) {
+      toast.error('Failed to update favorite status', { description: errorMessage(err) });
     }
   };
 
@@ -623,8 +623,8 @@ export default function IptvChannelsSettings() {
       );
       setSelectedIds(new Set());
       toast.success(`${isFavorite ? 'Added' : 'Removed'} ${channelIds.length} channels ${isFavorite ? 'to' : 'from'} favorites`);
-    } catch (err: any) {
-      toast.error('Bulk favorite operation failed', { description: err.message });
+    } catch (err) {
+      toast.error('Bulk favorite operation failed', { description: errorMessage(err) });
     }
   };
 
@@ -635,8 +635,8 @@ export default function IptvChannelsSettings() {
       await apiClient.post(`/iptv/channels/${channel.id}/hidden`, { isHidden: newStatus });
       setChannels((prev) => prev.map((c) => (c.id === channel.id ? { ...c, isHidden: newStatus } : c)));
       toast.success(newStatus ? 'Channel Hidden' : 'Channel Visible');
-    } catch (err: any) {
-      toast.error('Failed to update hidden status', { description: err.message });
+    } catch (err) {
+      toast.error('Failed to update hidden status', { description: errorMessage(err) });
     }
   };
 
@@ -649,8 +649,8 @@ export default function IptvChannelsSettings() {
       );
       setSelectedIds(new Set());
       toast.success(`${isHidden ? 'Hid' : 'Showed'} ${channelIds.length} channels`);
-    } catch (err: any) {
-      toast.error('Bulk hide operation failed', { description: err.message });
+    } catch (err) {
+      toast.error('Bulk hide operation failed', { description: errorMessage(err) });
     }
   };
 
@@ -665,8 +665,8 @@ export default function IptvChannelsSettings() {
           description: data.message,
         });
       }
-    } catch (err: any) {
-      toast.error('Failed to hide non-sports channels', { description: err.message });
+    } catch (err) {
+      toast.error('Failed to hide non-sports channels', { description: errorMessage(err) });
     }
   };
 
@@ -681,8 +681,8 @@ export default function IptvChannelsSettings() {
           description: data.message,
         });
       }
-    } catch (err: any) {
-      toast.error('Failed to unhide channels', { description: err.message });
+    } catch (err) {
+      toast.error('Failed to unhide channels', { description: errorMessage(err) });
     }
   };
 
@@ -708,10 +708,10 @@ export default function IptvChannelsSettings() {
       setSelectedLeagues(data.map((m) => m.leagueId));
       const preferred = data.find((m) => m.isPreferred);
       setPreferredLeagueId(preferred?.leagueId || null);
-    } catch (err: any) {
+    } catch (err) {
       if (requestId !== mappingRequestRef.current) return;
       setMappingsLoading(false);
-      toast.error('Failed to load mappings', { description: err.message });
+      toast.error('Failed to load mappings', { description: errorMessage(err) });
     }
   };
 
@@ -729,8 +729,8 @@ export default function IptvChannelsSettings() {
       toast.success('Mappings saved', {
         description: `Mapped to ${selectedLeagues.length} league(s)`,
       });
-    } catch (err: any) {
-      toast.error('Failed to save mappings', { description: err.message });
+    } catch (err) {
+      toast.error('Failed to save mappings', { description: errorMessage(err) });
     }
   };
 

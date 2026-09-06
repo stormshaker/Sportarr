@@ -60,7 +60,6 @@ const MAX_RENDERED_TEAMS = 200;
 
 const BADGE_RED = 'whitespace-nowrap rounded bg-red-900/30 px-1.5 py-0.5 text-xs text-red-400';
 const BADGE_GREEN = 'whitespace-nowrap rounded bg-green-900/30 px-1.5 py-0.5 text-xs text-green-400';
-const SCROLLABLE_LIST = 'max-h-60 overflow-y-auto';
 
 type TeamsColumnKey = 'badge' | 'name' | 'sport' | 'country' | 'status' | 'actions';
 

@@ -2,7 +2,6 @@ import { formatEventDate } from '../utils/timezone';
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import {
   FolderIcon,
-  MagnifyingGlassIcon,
   CheckCircleIcon,
   XCircleIcon,
   ExclamationCircleIcon,
@@ -207,7 +206,7 @@ const LibraryImportPage: React.FC = () => {
   });
 
   // Scan state
-  const [scanning, setScanning] = useState(false);
+  const [, setScanning] = useState(false);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const [scanError, setScanError] = useState<string | null>(null);
 
@@ -257,7 +256,7 @@ const LibraryImportPage: React.FC = () => {
   }, []);
 
   // Import state
-  const [importing, setImporting] = useState(false);
+  const [, setImporting] = useState(false);
   const [importProgress, setImportProgress] = useState<string | null>(null);
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
   const [scanProgress, setScanProgress] = useState<string | null>(null);
@@ -440,15 +439,6 @@ const LibraryImportPage: React.FC = () => {
   };
 
   // Legacy quick search functions
-  const openSearchForFile = (file: ImportableFile) => {
-    setActiveFile(file);
-    setSearchQuery(file.parsedTitle || file.fileName);
-    setShowSearchModal(true);
-    if (file.parsedTitle || file.fileName) {
-      searchEvents(file.parsedTitle || file.fileName);
-    }
-  };
-
   const selectEventForFile = (event: EventSearchResult) => {
     if (!activeFile || !event.id) return;
 

@@ -19,6 +19,7 @@ import apiClient from '../../api/client';
 import { apiGet } from '../../utils/api';
 import type { QualityProfile } from '../../types';
 import SettingsHeader from '../../components/SettingsHeader';
+import { errorMessage } from '../../utils/errors';
 
 // Naming preset types (same as MediaManagementSettings)
 interface NamingPreset {
@@ -209,6 +210,10 @@ function encodingSettingsFrom(data: DvrSettings) {
   };
 }
 
+// The encoding block of the DVR settings, inferred from the state that holds
+// it so the two cannot drift.
+type EncodingSettings = ReturnType<typeof encodingSettingsFrom>;
+
 export default function DvrSettingsPage() {
   // State
   // FFmpeg state
@@ -288,7 +293,7 @@ export default function DvrSettingsPage() {
       // regardless of reality.
       const { data } = await apiClient.get<{ available: boolean; version?: string; path?: string }>('/dvr/ffmpeg/status');
       setFfmpegAvailable(data.available);
-    } catch (err: any) {
+    } catch {
       setFfmpegAvailable(false);
     }
   };
@@ -310,7 +315,7 @@ export default function DvrSettingsPage() {
       if (data.videoBitrate > 0) {
         setGbPerHour(kbpsToGbPerHour(data.videoBitrate));
       }
-    } catch (err: any) {
+    } catch (err) {
       console.error('Failed to load DVR settings:', err);
     }
   };
@@ -325,7 +330,7 @@ export default function DvrSettingsPage() {
         const defaultProfile = data.find(p => p.isDefault) || data[0];
         setSelectedQualityProfileId(defaultProfile.id);
       }
-    } catch (err: any) {
+    } catch (err) {
       console.error('Failed to load user quality profiles:', err);
     }
   };
@@ -334,7 +339,7 @@ export default function DvrSettingsPage() {
     try {
       const { data } = await apiClient.get<HardwareAccelerationInfo[]>('/dvr/hardware-acceleration');
       setAvailableHwAccel(data);
-    } catch (err: any) {
+    } catch (err) {
       console.error('Failed to load hardware acceleration info:', err);
     }
   };
@@ -377,7 +382,7 @@ export default function DvrSettingsPage() {
 
 
   // Handle encoding setting change (for inline settings)
-  const handleEncodingSettingChange = (field: string, value: any) => {
+  const handleEncodingSettingChange = <K extends keyof EncodingSettings>(field: K, value: EncodingSettings[K]) => {
     const updated = { ...currentEncodingSettings, [field]: value };
     setCurrentEncodingSettings(updated);
     // Also update dvrSettings so it gets saved
@@ -433,7 +438,7 @@ export default function DvrSettingsPage() {
         profileData
       );
       setScorePreview(data);
-    } catch (err: any) {
+    } catch (err) {
       console.error('Failed to load score preview:', err);
       setScorePreview(null);
     } finally {
@@ -441,7 +446,7 @@ export default function DvrSettingsPage() {
     }
   };
 
-  const handleSettingsChange = (field: keyof DvrSettings, value: any) => {
+  const handleSettingsChange = <K extends keyof DvrSettings>(field: K, value: DvrSettings[K]) => {
     setDvrSettings(prev => ({ ...prev, [field]: value }));
   };
 
@@ -484,8 +489,8 @@ export default function DvrSettingsPage() {
       } catch {
         setEffectivePath(null);
       }
-    } catch (err: any) {
-      toast.error('Failed to save settings', { description: err.message });
+    } catch (err) {
+      toast.error('Failed to save settings', { description: errorMessage(err) });
     } finally {
       setIsSavingSettings(false);
     }

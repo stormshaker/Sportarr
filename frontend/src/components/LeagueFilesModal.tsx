@@ -7,6 +7,7 @@ import apiClient from '../api/client';
 import { toast } from 'sonner';
 import FileMetadataEditModal from './FileMetadataEditModal';
 import type { FileMetadataEditorValues } from './FileMetadataEditor';
+import { errorMessage } from '../utils/errors';
 
 interface RenamePreviewItem {
   leagueId: number;
@@ -183,8 +184,8 @@ export default function LeagueFilesModal({
       await queryClient.refetchQueries({ queryKey: ['league', leagueId.toString()] });
       await queryClient.refetchQueries({ queryKey: ['leagues'] });
     },
-    onError: (error: any) => {
-      toast.error(error.response?.data?.detail || 'Failed to delete file');
+    onError: (error: unknown) => {
+      toast.error(errorMessage(error, 'Failed to delete file'));
     },
   });
 

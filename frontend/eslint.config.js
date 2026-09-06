@@ -19,5 +19,27 @@ export default defineConfig([
       ecmaVersion: 2020,
       globals: globals.browser,
     },
+    rules: {
+      // Two intentional shapes that are not dead code: pulling fields out of
+      // an object purely to drop them (`const { id, ...rest } = x`), and a
+      // parameter a signature forces on you but the body has no use for.
+      // A leading underscore is the opt-out for the latter.
+      '@typescript-eslint/no-unused-vars': ['error', {
+        ignoreRestSiblings: true,
+        args: 'after-used',
+        argsIgnorePattern: '^_',
+        varsIgnorePattern: '^_',
+        caughtErrorsIgnorePattern: '^_',
+      }],
+    },
+  },
+  {
+    // Test helpers are not part of the Vite module graph the dev server fast-
+    // refreshes, so the "only export components" rule has nothing to protect
+    // here — it just objects to a render helper sitting next to a re-export.
+    files: ['src/test/**/*.{ts,tsx}'],
+    rules: {
+      'react-refresh/only-export-components': 'off',
+    },
   },
 ])

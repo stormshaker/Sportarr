@@ -3,6 +3,7 @@ import { PlusIcon, PencilIcon, TrashIcon, BellIcon, XMarkIcon, CheckCircleIcon }
 import { apiGet, apiPost, apiPut, apiDelete } from '../../utils/api';
 import SettingsHeader from '../../components/SettingsHeader';
 import TagSelector from '../../components/TagSelector';
+import { errorMessage } from '../../utils/errors';
 
 interface NotificationsSettingsProps {
   showAdvanced?: boolean;
@@ -248,9 +249,20 @@ const notificationTemplates: NotificationTemplate[] = [
   }
 ];
 
-export default function NotificationsSettings({ showAdvanced = false }: NotificationsSettingsProps) {
+// A notification row as stored: the provider-specific settings live in a
+// configJson string column, which the list flattens back onto the row.
+interface StoredNotification {
+  id?: number;
+  name?: string;
+  implementation?: string;
+  enabled?: boolean;
+  tags?: number[];
+  configJson?: string;
+}
+
+export default function NotificationsSettings({ showAdvanced: _showAdvanced = false }: NotificationsSettingsProps) {
   const [notifications, setNotifications] = useState<Notification[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [, setLoading] = useState(true);
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingNotification, setEditingNotification] = useState<Notification | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<number | null>(null);
@@ -267,7 +279,7 @@ export default function NotificationsSettings({ showAdvanced = false }: Notifica
       if (response.ok) {
         const data = await response.json();
         // Parse configJson for each notification
-        const parsedNotifications = data.map((n: any) => ({
+        const parsedNotifications = (data as StoredNotification[]).map((n) => ({
           ...n,
           ...(n.configJson ? JSON.parse(n.configJson) : {})
         }));
@@ -346,7 +358,7 @@ export default function NotificationsSettings({ showAdvanced = false }: Notifica
     });
   };
 
-  const handleFormChange = (field: keyof Notification, value: any) => {
+  const handleFormChange = <K extends keyof Notification>(field: K, value: Notification[K]) => {
     setFormData(prev => ({ ...prev, [field]: value }));
   };
 
@@ -358,7 +370,7 @@ export default function NotificationsSettings({ showAdvanced = false }: Notifica
     try {
       // Separate API fields from config fields
       const { id, name, implementation, enabled, tags, ...config } = formData as Partial<Notification>;
-      const { _headerPairs, ...cleanConfig } = config as any;
+      const { _headerPairs, ...cleanConfig } = config as Record<string, unknown> & { _headerPairs?: string };
       const notificationConfig: NotificationConfig = cleanConfig;
 
       const payload = {
@@ -466,8 +478,8 @@ export default function NotificationsSettings({ showAdvanced = false }: Notifica
       } else {
         setTestResult({ success: false, message: data.message || 'Failed to send notification' });
       }
-    } catch (error: any) {
-      setTestResult({ success: false, message: error.message || 'Error testing notification' });
+    } catch (error) {
+      setTestResult({ success: false, message: errorMessage(error) || 'Error testing notification' });
     } finally {
       setTesting(false);
     }
@@ -776,7 +788,7 @@ export default function NotificationsSettings({ showAdvanced = false }: Notifica
                             if (raw) {
                               const parsed = JSON.parse(raw);
                               if (Array.isArray(parsed)) {
-                                headerPairs = parsed.map((p: any) => ({ key: p.key || '', value: p.value || '' }));
+                                headerPairs = parsed.map((p: { key?: string; value?: string }) => ({ key: p.key || '', value: p.value || '' }));
                               } else {
                                 headerPairs = Object.entries(parsed).map(([k, v]) => ({ key: k, value: String(v) }));
                               }
@@ -798,7 +810,7 @@ export default function NotificationsSettings({ showAdvanced = false }: Notifica
                           // Prefer raw pairs from UI state if available
                           let displayPairs = headerPairs;
                           try {
-                            const rawPairs = (formData as any)._headerPairs;
+                            const rawPairs = (formData as { _headerPairs?: string })._headerPairs;
                             if (rawPairs) {
                               displayPairs = JSON.parse(rawPairs);
                             }
@@ -834,7 +846,7 @@ export default function NotificationsSettings({ showAdvanced = false }: Notifica
                                   <button
                                     type="button"
                                     onClick={() => {
-                                      const updated = displayPairs.filter((_: any, i: number) => i !== idx);
+                                      const updated = displayPairs.filter((_, i: number) => i !== idx);
                                       updateHeaders(updated.length > 0 ? updated : [{ key: '', value: '' }]);
                                     }}
                                     className="px-2 py-2 text-gray-400 hover:text-red-400 transition-colors"

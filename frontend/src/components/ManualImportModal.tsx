@@ -15,6 +15,7 @@ import {
 } from '@heroicons/react/24/outline';
 import { apiGet, apiPost, apiPut } from '../utils/api';
 import FileMetadataEditor, { type FileMetadataEditorValues } from './FileMetadataEditor';
+import { errorMessage } from '../utils/errors';
 
 interface League {
   id: number;
@@ -168,7 +169,7 @@ export default function ManualImportModal({ pendingImport, onClose, onSuccess, i
   const [selectedPart, setSelectedPart] = useState<string | null>(
     pendingImport.suggestedPart || null
   );
-  const [selectedPartNumber, setSelectedPartNumber] = useState<number | null>(null);
+  const [, setSelectedPartNumber] = useState<number | null>(null);
 
   // Pre-import metadata editor state. Pre-filled from the parser-derived values
   // on the pending import; user can override any field before clicking Import.
@@ -457,9 +458,9 @@ export default function ManualImportModal({ pendingImport, onClose, onSuccess, i
       }
 
       onSuccess();
-    } catch (error: any) {
+    } catch (error) {
       console.error('Failed to import:', error);
-      alert(`Import failed: ${error.response?.data?.error || error.message}`);
+      alert(`Import failed: ${errorMessage(error)}`);
     } finally {
       setIsLoading(false);
     }
@@ -475,9 +476,9 @@ export default function ManualImportModal({ pendingImport, onClose, onSuccess, i
       }
 
       onSuccess();
-    } catch (error: any) {
+    } catch (error) {
       console.error('Failed to reject:', error);
-      alert(error?.message ?? 'Could not reject this file');
+      alert(errorMessage(error, 'Could not reject this file'));
     } finally {
       setIsLoading(false);
     }
