@@ -215,7 +215,6 @@ export default function IptvCoveragePage({ embedded = false }: { embedded?: bool
 
   useEffect(() => {
     load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Fetch mappings for a league on first expand. Re-fetch when the

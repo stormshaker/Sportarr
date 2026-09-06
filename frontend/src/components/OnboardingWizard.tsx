@@ -401,7 +401,6 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
       }
     })();
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProfileId, stepKey]);
 
   const steps = buildSteps(wantsDownload, wantsIptv);
