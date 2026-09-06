@@ -399,7 +399,11 @@ export default function AddLeagueModal({ league, isOpen, onClose, onAdd, isAddin
       );
     }
     return filtered;
-  }, [teams, searchQuery]);
+    // selectedTeamIds is read by the filter above, to keep a team that is
+    // already ticked visible while a search narrows the list. Without it here
+    // the list kept using the selection from before the tick, so a selected
+    // team dropped out the moment the query stopped matching its name.
+  }, [teams, searchQuery, selectedTeamIds]);
 
   // Load existing monitored teams when in edit mode (not for motorsports)
   // Only load once when existingLeague first becomes available
