@@ -117,7 +117,7 @@ export default function IptvChannelsSettings() {
   const [leagues, setLeagues] = useState<League[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [totalChannels, setTotalChannels] = useState(0);
+  const [, setTotalChannels] = useState(0);
   const [currentPage, setCurrentPage] = useState(0);
   const [hasMore, setHasMore] = useState(true);
 

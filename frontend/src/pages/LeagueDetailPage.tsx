@@ -2642,8 +2642,6 @@ export default function LeagueDetailPage() {
                       <div className="divide-y divide-red-900/30">
                         {visibleSeasonEvents.map(event => {
                 const hasFile = event.hasFile;
-                const eventDate = new Date(event.eventDate);
-                const isPast = eventDate < new Date();
 
                 return (
                   <div

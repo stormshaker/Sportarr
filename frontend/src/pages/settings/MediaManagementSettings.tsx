@@ -142,7 +142,7 @@ export default function MediaManagementSettings({ showAdvanced: propShowAdvanced
   // so we don't walk the disk unsolicited every time the user opens the
   // Settings page.
   const [unmappedByRoot, setUnmappedByRoot] = useState<Record<number, { loading: boolean; folders: { name: string; path: string }[]; error?: string; expanded: boolean }>>({});
-  const [loading, setLoading] = useState(true);
+  const [, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [showAddFolderModal, setShowAddFolderModal] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<number | null>(null);
@@ -170,7 +170,7 @@ export default function MediaManagementSettings({ showAdvanced: propShowAdvanced
   }, [showAdvanced]);
 
   // Use unsaved changes hook
-  const { blockNavigation } = useUnsavedChanges(hasUnsavedChanges);
+  useUnsavedChanges(hasUnsavedChanges);
 
   // Media Management Settings stored in database
   const [settings, setSettings] = useState<MediaManagementSettingsData>(() => ({ ...DEFAULT_MEDIA_MANAGEMENT_SETTINGS }));

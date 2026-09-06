@@ -288,7 +288,7 @@ export default function DvrSettingsPage() {
       // regardless of reality.
       const { data } = await apiClient.get<{ available: boolean; version?: string; path?: string }>('/dvr/ffmpeg/status');
       setFfmpegAvailable(data.available);
-    } catch (err: any) {
+    } catch {
       setFfmpegAvailable(false);
     }
   };

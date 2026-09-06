@@ -248,9 +248,9 @@ const notificationTemplates: NotificationTemplate[] = [
   }
 ];
 
-export default function NotificationsSettings({ showAdvanced = false }: NotificationsSettingsProps) {
+export default function NotificationsSettings({ showAdvanced: _showAdvanced = false }: NotificationsSettingsProps) {
   const [notifications, setNotifications] = useState<Notification[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [, setLoading] = useState(true);
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingNotification, setEditingNotification] = useState<Notification | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<number | null>(null);

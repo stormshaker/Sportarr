@@ -44,7 +44,7 @@ const SOURCE_PRESETS = ['BluRay', 'WEB-DL', 'WEBDL', 'WEBRip', 'HDTV', 'DVDRip',
 const RESOLUTION_PRESETS = ['2160p', '1080p', '720p', '480p', '4K', 'UHD', 'HD', 'SD'];
 const LANGUAGE_PRESETS = ['English', 'Spanish', 'French', 'Japanese', 'Portuguese'];
 
-export default function CustomFormatsSettings({ showAdvanced = false, embedded = false }: CustomFormatsSettingsProps) {
+export default function CustomFormatsSettings({ showAdvanced: _showAdvanced = false, embedded = false }: CustomFormatsSettingsProps) {
   const [customFormats, setCustomFormats] = useState<CustomFormat[]>([]);
   const [loading, setLoading] = useState(true);
 

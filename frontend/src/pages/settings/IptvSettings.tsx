@@ -836,7 +836,7 @@ export default function IptvSettings() {
                   type="password"
                   value={formData.password}
                   onChange={(e) => handleFormChange('password', e.target.value)}
-                  onFocus={(e) => {
+                  onFocus={() => {
                     // Clear the placeholder when user focuses the field to type a new password
                     if (formData.password === EXISTING_PASSWORD_PLACEHOLDER) {
                       handleFormChange('password', '');

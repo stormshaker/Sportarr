@@ -64,7 +64,7 @@ export default function LeagueSearchPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedSport, setSelectedSport] = useState('all');
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [editMode, setEditMode] = useState(false);
+  const [, setEditMode] = useState(false);
   const [hoveredLeagueId, setHoveredLeagueId] = useState<string | null>(null);
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
   const compactView = useCompactView();

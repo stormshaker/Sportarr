@@ -168,7 +168,7 @@ export default function ManualImportModal({ pendingImport, onClose, onSuccess, i
   const [selectedPart, setSelectedPart] = useState<string | null>(
     pendingImport.suggestedPart || null
   );
-  const [selectedPartNumber, setSelectedPartNumber] = useState<number | null>(null);
+  const [, setSelectedPartNumber] = useState<number | null>(null);
 
   // Pre-import metadata editor state. Pre-filled from the parser-derived values
   // on the pending import; user can override any field before clicking Import.

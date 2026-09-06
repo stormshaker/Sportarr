@@ -335,17 +335,6 @@ export default function DvrRecordingsSettings() {
     }
   };
 
-  const handleCancelRecording = async (id: number) => {
-    try {
-      await apiClient.post(`/dvr/recordings/${id}/cancel`);
-      await loadRecordings();
-      await loadStats();
-      toast.success('Recording Cancelled');
-    } catch (err: any) {
-      toast.error('Failed to cancel recording', { description: err.message });
-    }
-  };
-
   const handleDeleteRecording = async (id: number) => {
     try {
       await apiClient.delete(`/dvr/recordings/${id}`);

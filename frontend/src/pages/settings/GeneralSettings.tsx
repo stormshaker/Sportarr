@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { ServerIcon, ShieldCheckIcon, FolderArrowDownIcon, ArrowPathIcon, ChartBarIcon, DocumentDuplicateIcon, CheckIcon, TvIcon, ArrowDownTrayIcon, ClipboardDocumentIcon } from '@heroicons/react/24/outline';
 import { toast } from 'sonner';
 import { apiGet, apiPost, apiPut } from '../../utils/api';
@@ -66,7 +65,6 @@ interface UpdateSettings {
 }
 
 export default function GeneralSettings({ showAdvanced = false }: GeneralSettingsProps) {
-  const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [apiKeyCopied, setApiKeyCopied] = useState(false);
@@ -77,7 +75,7 @@ export default function GeneralSettings({ showAdvanced = false }: GeneralSetting
   const initialValues = useRef<any>(null);
 
   // Use unsaved changes hook
-  const { blockNavigation } = useUnsavedChanges(hasUnsavedChanges);
+  useUnsavedChanges(hasUnsavedChanges);
 
   // Host Settings
   const [hostSettings, setHostSettings] = useState<HostSettings>({

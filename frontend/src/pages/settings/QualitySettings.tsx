@@ -36,7 +36,7 @@ export default function QualitySettings({ showAdvanced = false, embedded = false
   const [saving, setSaving] = useState(false);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const initialDefinitions = useRef<QualityDefinition[] | null>(null);
-  const { blockNavigation } = useUnsavedChanges(hasUnsavedChanges);
+  useUnsavedChanges(hasUnsavedChanges);
 
   // TRaSH import state
   const [importing, setImporting] = useState(false);

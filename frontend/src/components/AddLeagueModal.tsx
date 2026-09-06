@@ -119,8 +119,8 @@ export default function AddLeagueModal({ league, isOpen, onClose, onAdd, isAddin
   const [searchForCutoffUnmetEvents, setSearchForCutoffUnmetEvents] = useState(false);
   // For fighting sports: default to all parts selected
   const [monitoredParts, setMonitoredParts] = useState<Set<string>>(new Set());
-  const [selectAllParts, setSelectAllParts] = useState(false);
-  const [applyMonitoredPartsToEvents, setApplyMonitoredPartsToEvents] = useState(true);
+  const [, setSelectAllParts] = useState(false);
+  const [applyMonitoredPartsToEvents] = useState(true);
   // For motorsports: session types to monitor (default to all selected)
   // Note: selectAllSessionTypes starts false to match empty Set, will be set true when availableSessionTypes loads
   const [monitoredSessionTypes, setMonitoredSessionTypes] = useState<Set<string>>(new Set());
@@ -667,19 +667,6 @@ export default function AddLeagueModal({ league, isOpen, onClose, onAdd, isAddin
     });
   };
 
-  const handleSelectAllParts = () => {
-    if (!league?.strSport) return;
-    const availableParts = getPartOptions(league.strSport);
-
-    if (selectAllParts) {
-      setMonitoredParts(new Set());
-      setSelectAllParts(false);
-    } else {
-      setMonitoredParts(new Set(availableParts));
-      setSelectAllParts(true);
-    }
-  };
-
   const handleSessionTypeToggle = (sessionType: string) => {
     setMonitoredSessionTypes(prev => {
       const newSet = new Set(prev);
@@ -869,7 +856,6 @@ export default function AddLeagueModal({ league, isOpen, onClose, onAdd, isAddin
   const selectedCount = selectedTeamIds.size;
   const logoUrl = league?.strBadge || league?.strLogo;
   const availableParts = league ? getPartOptions(league.strSport) : [];
-  const selectedPartsCount = monitoredParts.size;
   const selectedSessionTypesCount = monitoredSessionTypes.size;
 
   // Per-type quality dropdowns name the profile the league default resolves

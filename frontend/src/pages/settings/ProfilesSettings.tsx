@@ -577,46 +577,6 @@ export default function ProfilesSettings({ showAdvanced = false }: ProfilesSetti
   };
 
   // Legacy handler - now requires a defined id to avoid matching all undefined items
-  const handleToggleQuality = (itemId: number | undefined, isGroup: boolean = false) => {
-    // If itemId is undefined, do nothing to prevent toggling all items
-    if (itemId === undefined) {
-      console.warn('handleToggleQuality called with undefined id');
-      return;
-    }
-
-    setFormData(prev => ({
-      ...prev,
-      items: prev.items?.map(item => {
-        if (item.id === itemId) {
-          const newAllowed = !item.allowed;
-          // If it's a group, toggle all children too
-          if (isGroup && item.items) {
-            return {
-              ...item,
-              allowed: newAllowed,
-              items: item.items.map(child => ({ ...child, allowed: newAllowed }))
-            };
-          }
-          return { ...item, allowed: newAllowed };
-        }
-        // Check if the target is inside a group
-        if (item.items) {
-          const updatedItems = item.items.map(child =>
-            child.id === itemId ? { ...child, allowed: !child.allowed } : child
-          );
-          // Check if any child actually changed
-          const hasChange = item.items.some((c, i) => c.allowed !== updatedItems[i].allowed);
-          if (hasChange) {
-            // If any child changed, update the group's allowed state
-            const anyAllowed = updatedItems.some(child => child.allowed);
-            return { ...item, items: updatedItems, allowed: anyAllowed };
-          }
-        }
-        return item;
-      })
-    }));
-  };
-
   // Move item up in the list
   const handleMoveUp = (index: number) => {
     if (index === 0) return;

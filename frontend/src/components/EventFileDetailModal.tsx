@@ -179,7 +179,7 @@ export default function EventFileDetailModal({
       });
       return response.data;
     },
-    onSuccess: async (data) => {
+    onSuccess: async () => {
       let message = 'All files deleted';
       if (deleteAllBlocklistAction === 'blocklistAndSearch') {
         message = 'All files deleted, releases blocklisted, searching for replacements...';

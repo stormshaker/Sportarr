@@ -226,12 +226,6 @@ export default function Layout() {
     }
   };
 
-  const isActive = (path?: string, children?: { path: string }[]) => {
-    if (path) return navPath === path;
-    if (children) return children.some((child) => navPath === child.path);
-    return false;
-  };
-
   // Auto-collapse dropdowns when navigating to a different top-level section (like Sonarr)
   useEffect(() => {
     // Find which top-level menu section the current path belongs to

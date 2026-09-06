@@ -16,7 +16,7 @@ export default function DevelopmentSettings() {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const initialSettings = useRef<DevelopmentSettingsData | null>(null);
-  const { blockNavigation } = useUnsavedChanges(hasUnsavedChanges);
+  useUnsavedChanges(hasUnsavedChanges);
   const [settings, setSettings] = useState<DevelopmentSettingsData>({
     customMetadataApiUrl: '',
   });

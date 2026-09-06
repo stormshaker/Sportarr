@@ -270,7 +270,7 @@ const downloadClientTemplates: ClientTemplate[] = [
   }
 ];
 
-export default function DownloadClientsSettings({ showAdvanced = false }: DownloadClientsSettingsProps) {
+export default function DownloadClientsSettings({ showAdvanced: _showAdvanced = false }: DownloadClientsSettingsProps) {
   const [downloadClients, setDownloadClients] = useState<DownloadClient[]>([]);
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingClient, setEditingClient] = useState<DownloadClient | null>(null);
@@ -472,7 +472,7 @@ export default function DownloadClientsSettings({ showAdvanced = false }: Downlo
     downloadMonitorPollSeconds: number;
     diskScanIntervalMinutes: number;
   } | null>(null);
-  const { blockNavigation } = useUnsavedChanges(hasUnsavedChanges);
+  useUnsavedChanges(hasUnsavedChanges);
 
   // Detect changes
   useEffect(() => {
