@@ -26,6 +26,8 @@ import { PAGE_PADDING, BUTTON_PRIMARY, BUTTON_SECONDARY, BUTTON_SUCCESS } from '
 // row that runs off the card.
 const HEADER_ACTION = 'w-full min-w-0 max-sm:gap-1 max-sm:px-1.5 max-sm:text-[11px]';
 import { isFightingSport, isTeamlessSport, usesFightingEventTypes } from '../utils/leagueSportRules';
+import { errorMessage } from '../utils/errors';
+import type { League as AddLeagueModalLeague } from '../components/AddLeagueModal';
 
 // Type for the league prop passed to AddLeagueModal
 interface ModalLeagueData {
@@ -934,9 +936,8 @@ export default function LeagueDetailPage() {
       await queryClient.invalidateQueries({ queryKey: ['leagues'] });
       navigate('/leagues');
     },
-    onError: (error: any) => {
-      const errorMessage = error.response?.data?.error || 'Failed to delete league';
-      toast.error(errorMessage);
+    onError: (error: unknown) => {
+      toast.error(errorMessage(error, 'Failed to delete league'));
     },
   });
 
@@ -972,8 +973,8 @@ export default function LeagueDetailPage() {
       await queryClient.refetchQueries({ queryKey: ['leagues'] });
       toast.success(data.message || 'File deleted');
     },
-    onError: (error: any) => {
-      toast.error(error.response?.data?.detail || 'Failed to delete file');
+    onError: (error: unknown) => {
+      toast.error(errorMessage(error, 'Failed to delete file'));
     },
   });
 
@@ -997,7 +998,7 @@ export default function LeagueDetailPage() {
 
 
   const handleEditLeagueSettings = (
-    league: any,
+    league: AddLeagueModalLeague,
     monitoredTeamIds: string[],
     monitorType: string,
     qualityProfileId: number | null,

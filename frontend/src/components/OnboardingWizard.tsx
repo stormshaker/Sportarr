@@ -138,6 +138,59 @@ const CLIENT_TYPES = [
   { value: 6, label: 'NZBGet', port: 6789, auth: 'userpass', protocol: 'usenet' },
 ] as const;
 
+// The wizard reads a handful of fields back off records the API returns, to
+// repopulate its forms when you edit an entry. These describe exactly that
+// subset — the API sends a great deal more per record, and restating the whole
+// surface here would duplicate the settings pages and go stale the moment
+// either side gains a field.
+
+interface OnboardingStatus {
+  hasRootFolder?: boolean;
+  hasDownloadClient?: boolean;
+  hasEnabledIndexer?: boolean;
+  hasIptvSource?: boolean;
+}
+
+// Both are JSON blobs the API hands over as strings for the client to parse.
+interface SettingsResponse {
+  securitySettings?: string;
+  mediaManagementSettings?: string;
+}
+
+interface RootFolderSummary {
+  path?: string;
+}
+
+interface SavedDownloadClient {
+  id: number;
+  name?: string;
+  type?: number;
+  host?: string;
+  port?: number;
+  username?: string;
+  password?: string;
+  apiKey?: string;
+}
+
+interface SavedIndexer {
+  id: number;
+  name?: string;
+  protocol?: string;
+  // Older records carry url; newer ones baseUrl. Both are read.
+  baseUrl?: string;
+  url?: string;
+  apiKey?: string;
+}
+
+interface SavedIptvSource {
+  id: number;
+  name?: string;
+  type?: string;
+  url?: string;
+  username?: string;
+  password?: string;
+}
+
 export default function OnboardingWizard({ onClose, onComplete }: OnboardingWizardProps) {
   const navigate = useNavigate();
   const { login } = useAuth();
@@ -189,7 +242,7 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
   const [dcPass, setDcPass] = useState('');
   const [dcApiKey, setDcApiKey] = useState('');
   const [dcTest, setDcTest] = useState<{ ok: boolean; msg: string } | null>(null);
-  const [addedClients, setAddedClients] = useState<{ id: number; label: string; raw: any }[]>([]);
+  const [addedClients, setAddedClients] = useState<{ id: number; label: string; raw: SavedDownloadClient }[]>([]);
   const [editingClientId, setEditingClientId] = useState<number | null>(null);
 
   // Indexer form plus the editable list of saved indexers. The API key is
@@ -199,7 +252,7 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
   const [ixUrl, setIxUrl] = useState('');
   const [ixApiKey, setIxApiKey] = useState('');
   const [ixTest, setIxTest] = useState<{ ok: boolean; msg: string } | null>(null);
-  const [addedIndexers, setAddedIndexers] = useState<{ id: number; label: string; raw: any }[]>([]);
+  const [addedIndexers, setAddedIndexers] = useState<{ id: number; label: string; raw: SavedIndexer }[]>([]);
   const [editingIndexerId, setEditingIndexerId] = useState<number | null>(null);
   const [sportarrApiKey, setSportarrApiKey] = useState('');
 
@@ -223,7 +276,7 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
   const [pPass, setPPass] = useState('');
   const [pEpg, setPEpg] = useState('');
   const [channelCount, setChannelCount] = useState<number | null>(null);
-  const [addedProviders, setAddedProviders] = useState<{ id: number; label: string; raw: any }[]>([]);
+  const [addedProviders, setAddedProviders] = useState<{ id: number; label: string; raw: SavedIptvSource }[]>([]);
   const [editingProviderId, setEditingProviderId] = useState<number | null>(null);
 
   // Quality: the two seeded, TRaSH-scored profiles. HD is the default.
@@ -239,7 +292,7 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
   useEffect(() => {
     (async () => {
       try {
-        const { data: st } = await apiClient.get<any>('/onboarding/status');
+        const { data: st } = await apiClient.get<OnboardingStatus>('/onboarding/status');
         if (st?.hasRootFolder) setInstallConfigured(true);
         if (st && (st.hasDownloadClient || st.hasEnabledIndexer || st.hasIptvSource)) {
           setWantsDownload(Boolean(st.hasDownloadClient || st.hasEnabledIndexer));
@@ -247,7 +300,7 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
         }
       } catch { /* fresh-install defaults stand */ }
       try {
-        const { data: settings } = await apiClient.get<any>('/settings');
+        const { data: settings } = await apiClient.get<SettingsResponse>('/settings');
         const security = JSON.parse(settings.securitySettings || '{}');
         const method = security.authenticationMethod;
         if (method === 'forms' || method === 'basic' || method === 'external') {
@@ -261,25 +314,25 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
         if (media.standardFileFormat) setCurrentNamingFormat(media.standardFileFormat);
       } catch { /* defaults stand */ }
       try {
-        const { data: roots } = await apiClient.get<any[]>('/rootfolder');
+        const { data: roots } = await apiClient.get<RootFolderSummary[]>('/rootfolder');
         if (Array.isArray(roots) && roots.length > 0 && roots[0]?.path) setRootPath(roots[0].path);
       } catch { /* default path stands */ }
       try {
-        const { data: clients } = await apiClient.get<any[]>('/downloadclient');
+        const { data: clients } = await apiClient.get<SavedDownloadClient[]>('/downloadclient');
         if (Array.isArray(clients) && clients.length > 0) {
           setAddedClients(clients.map((c) => ({ id: c.id, label: `${c.name} (${c.host}:${c.port})`, raw: c })));
         }
       } catch { /* none listed */ }
       try {
-        const { data: ixs } = await apiClient.get<any[]>('/indexer');
+        const { data: ixs } = await apiClient.get<SavedIndexer[]>('/indexer');
         if (Array.isArray(ixs) && ixs.length > 0) {
-          setAddedIndexers(ixs.map((x) => ({ id: x.id, label: x.name, raw: x })));
+          setAddedIndexers(ixs.map((x) => ({ id: x.id, label: x.name ?? `Indexer ${x.id}`, raw: x })));
         }
       } catch { /* none listed */ }
       try {
-        const { data: sources } = await apiClient.get<any[]>('/iptv/sources');
+        const { data: sources } = await apiClient.get<SavedIptvSource[]>('/iptv/sources');
         if (Array.isArray(sources) && sources.length > 0) {
-          setAddedProviders(sources.map((s) => ({ id: s.id, label: s.name, raw: s })));
+          setAddedProviders(sources.map((s) => ({ id: s.id, label: s.name ?? `Provider ${s.id}`, raw: s })));
         }
       } catch { /* none listed */ }
     })();
@@ -420,7 +473,7 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
     }
     setBusy(true);
     try {
-      const { data: settings } = await apiClient.get<any>('/settings');
+      const { data: settings } = await apiClient.get<SettingsResponse>('/settings');
       const security = JSON.parse(settings.securitySettings || '{}');
       security.authenticationMethod = authMethod;
       if (writingCredentials) {
@@ -527,7 +580,7 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
       const preset = namingPresets[namingKey];
       if (preset?.format) {
         try {
-          const { data: settings } = await apiClient.get<any>('/settings');
+          const { data: settings } = await apiClient.get<SettingsResponse>('/settings');
           const media = JSON.parse(settings.mediaManagementSettings || '{}');
           media.standardFileFormat = preset.format;
           media.renameEpisodes = true;
@@ -617,8 +670,10 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
           : c)));
         toast.success('Download client updated');
       } else {
-        const { data } = await apiClient.post<any>('/downloadclient', payload);
-        setAddedClients((prev) => [...prev, { id: data?.id, label: `${payload.name} (${payload.host}:${payload.port})`, raw: data ?? payload }]);
+        const { data } = await apiClient.post<SavedDownloadClient>('/downloadclient', payload);
+        if (data?.id != null) {
+          setAddedClients((prev) => [...prev, { id: data.id, label: `${payload.name} (${payload.host}:${payload.port})`, raw: data }]);
+        }
       }
       return true;
     } catch (err) {
@@ -639,7 +694,7 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
     }
   };
 
-  const editClient = (entry: { id: number; raw: any }) => {
+  const editClient = (entry: { id: number; raw: SavedDownloadClient }) => {
     const c = entry.raw ?? {};
     setDcType(c.type ?? 0);
     setDcHost(c.host ?? '');
@@ -675,8 +730,10 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
           : x)));
         toast.success('Indexer updated');
       } else {
-        const { data } = await apiClient.post<any>('/indexer', payload);
-        setAddedIndexers((prev) => [...prev, { id: data?.id, label: payload.name, raw: data ?? payload }]);
+        const { data } = await apiClient.post<SavedIndexer>('/indexer', payload);
+        if (data?.id != null) {
+          setAddedIndexers((prev) => [...prev, { id: data.id, label: payload.name, raw: data }]);
+        }
       }
       return true;
     } catch (err) {
@@ -697,7 +754,7 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
     }
   };
 
-  const editIndexer = (entry: { id: number; raw: any }) => {
+  const editIndexer = (entry: { id: number; raw: SavedIndexer }) => {
     const x = entry.raw ?? {};
     setIxProtocol((x.protocol === 'torrent' ? 'torrent' : 'usenet'));
     setIxName(x.name ?? '');
@@ -716,7 +773,7 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
     setEditingProviderId(null);
   };
 
-  const editProvider = (entry: { id: number; raw: any }) => {
+  const editProvider = (entry: { id: number; raw: SavedIptvSource }) => {
     const s = entry.raw ?? {};
     setPName(s.name ?? '');
     setPType(s.type === 'Xtream' ? 'Xtream' : 'M3U');

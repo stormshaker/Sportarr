@@ -277,7 +277,7 @@ export default function DvrRecordingsSettings() {
     }
   };
 
-  const handleFormChange = (field: keyof ScheduleFormData, value: any) => {
+  const handleFormChange = <K extends keyof ScheduleFormData>(field: K, value: ScheduleFormData[K]) => {
     setFormData(prev => ({ ...prev, [field]: value }));
   };
 
@@ -1287,7 +1287,7 @@ export default function DvrRecordingsSettings() {
                   <label className="block text-sm font-medium text-gray-300 mb-2">Import Mode</label>
                   <select
                     value={formData.importMode ?? ''}
-                    onChange={(e) => handleFormChange('importMode', e.target.value)}
+                    onChange={(e) => handleFormChange('importMode', e.target.value as ScheduleFormData['importMode'])}
                     className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-red-600"
                   >
                     <option value="">Leave in place (default)</option>

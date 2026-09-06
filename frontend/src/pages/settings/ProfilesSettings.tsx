@@ -365,7 +365,7 @@ export default function ProfilesSettings({ showAdvanced = false }: ProfilesSetti
           const updatedResponse = await apiGet(`/api/qualityprofile/${editingProfile.id}`);
           if (updatedResponse.ok) {
             const updatedProfile = await updatedResponse.json();
-            const formatItemsWithNames = updatedProfile.formatItems?.map((item: any) => {
+            const formatItemsWithNames = updatedProfile.formatItems?.map((item: { formatId: number }) => {
               const format = customFormats.find(f => f.id === item.formatId);
               return {
                 ...item,

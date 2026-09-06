@@ -55,6 +55,18 @@ interface ImportReturn {
   fileName: string;
 }
 
+// A league already in the library, as /api/leagues returns it.
+interface UserLeague {
+  id: number;
+  externalId?: string;
+  name?: string;
+  monitored?: boolean;
+  monitorType?: string;
+  qualityProfileId?: number | null;
+  logoUrl?: string;
+  eventCount?: number;
+}
+
 const MAX_RENDERED_LEAGUES = 200;
 
 export default function LeagueSearchPage() {
@@ -115,7 +127,7 @@ export default function LeagueSearchPage() {
   // Create a map of added leagues by external ID (includes logo URLs from database)
   const addedLeaguesMap = useMemo(() => {
     const map = new Map<string, AddedLeagueInfo & { logoUrl?: string }>();
-    userLeagues.forEach((league: any) => {
+    (userLeagues as UserLeague[]).forEach((league) => {
       if (league.externalId) {
         map.set(league.externalId, {
           id: league.id,
@@ -487,7 +499,7 @@ export default function LeagueSearchPage() {
 
   // Helper to open delete confirmation with stable data
   const openDeleteModal = (leagueId: number, leagueName: string) => {
-    const userLeague = userLeagues.find((l: any) => l.id === leagueId);
+    const userLeague = (userLeagues as UserLeague[]).find((l) => l.id === leagueId);
     const eventCount = userLeague?.eventCount || 0;
     deleteModalDataRef.current = { leagueId, leagueName, eventCount };
     setIsDeleteConfirmOpen(true);

@@ -26,7 +26,7 @@ interface CustomFormatSpecification {
   implementation: string;
   negate: boolean;
   required: boolean;
-  fields: Record<string, any>;
+  fields: Record<string, string | number | boolean | null>;
 }
 
 const CONDITION_TYPES = [
@@ -43,6 +43,17 @@ const CONDITION_TYPES = [
 const SOURCE_PRESETS = ['BluRay', 'WEB-DL', 'WEBDL', 'WEBRip', 'HDTV', 'DVDRip', 'CAM', 'TELESYNC'];
 const RESOLUTION_PRESETS = ['2160p', '1080p', '720p', '480p', '4K', 'UHD', 'HD', 'SD'];
 const LANGUAGE_PRESETS = ['English', 'Spanish', 'French', 'Japanese', 'Portuguese'];
+
+// A specification as it appears in a pasted Sonarr/Radarr export. Sonarr
+// sends fields as an array of {name, value}; our own format keys them
+// directly, and the import normalises the former into the latter.
+interface ImportedSpecification {
+  name?: string;
+  implementation?: string;
+  negate?: boolean;
+  required?: boolean;
+  fields?: { name?: string; value?: string | number | boolean | null }[] | Record<string, string | number | boolean | null>;
+}
 
 export default function CustomFormatsSettings({ showAdvanced: _showAdvanced = false, embedded = false }: CustomFormatsSettingsProps) {
   const [customFormats, setCustomFormats] = useState<CustomFormat[]>([]);
@@ -205,11 +216,11 @@ export default function CustomFormatsSettings({ showAdvanced: _showAdvanced = fa
       // If importing from within the Add/Edit modal, populate formData instead of saving directly
       if (showAddModal) {
         // Transform specifications to handle Sonarr's full implementation names
-        const transformedSpecs = (parsed.specifications || []).map((spec: any) => ({
+        const transformedSpecs = (parsed.specifications || []).map((spec: ImportedSpecification) => ({
           ...spec,
           // Normalize fields from Sonarr's array format to our object format
           fields: Array.isArray(spec.fields)
-            ? spec.fields.reduce((acc: Record<string, any>, field: any) => {
+            ? spec.fields.reduce((acc: Record<string, string | number | boolean | null>, field: { name?: string; value?: string | number | boolean | null }) => {
                 if (field.name && field.value !== undefined) {
                   acc[field.name] = field.value;
                 }
@@ -722,7 +733,7 @@ export default function CustomFormatsSettings({ showAdvanced: _showAdvanced = fa
                       <label className="block text-sm font-medium text-gray-300 mb-2">Min Size (MB)</label>
                       <input
                         type="number"
-                        value={conditionForm.fields.min || ''}
+                        value={typeof conditionForm.fields.min === 'boolean' ? '' : conditionForm.fields.min ?? ''}
                         onChange={(e) => setConditionForm({
                           ...conditionForm,
                           fields: { ...conditionForm.fields, min: parseFloat(e.target.value) || 0 }
@@ -735,7 +746,7 @@ export default function CustomFormatsSettings({ showAdvanced: _showAdvanced = fa
                       <label className="block text-sm font-medium text-gray-300 mb-2">Max Size (MB)</label>
                       <input
                         type="number"
-                        value={conditionForm.fields.max || ''}
+                        value={typeof conditionForm.fields.max === 'boolean' ? '' : conditionForm.fields.max ?? ''}
                         onChange={(e) => setConditionForm({
                           ...conditionForm,
                           fields: { ...conditionForm.fields, max: parseFloat(e.target.value) || 0 }
@@ -750,7 +761,7 @@ export default function CustomFormatsSettings({ showAdvanced: _showAdvanced = fa
                 <div>
                   <label className="block text-sm font-medium text-gray-300 mb-2">Release Type</label>
                   <select
-                    value={conditionForm.fields.value || 'SingleEvent'}
+                    value={typeof conditionForm.fields.value === 'boolean' ? 'SingleEvent' : conditionForm.fields.value || 'SingleEvent'}
                     onChange={(e) => setConditionForm({
                       ...conditionForm,
                       fields: { value: e.target.value }
@@ -775,7 +786,7 @@ export default function CustomFormatsSettings({ showAdvanced: _showAdvanced = fa
                     </label>
                     <input
                       type="text"
-                      value={conditionForm.fields.value || ''}
+                      value={typeof conditionForm.fields.value === 'boolean' ? '' : conditionForm.fields.value ?? ''}
                       onChange={(e) => setConditionForm({
                         ...conditionForm,
                         fields: { value: e.target.value }

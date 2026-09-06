@@ -249,6 +249,17 @@ const notificationTemplates: NotificationTemplate[] = [
   }
 ];
 
+// A notification row as stored: the provider-specific settings live in a
+// configJson string column, which the list flattens back onto the row.
+interface StoredNotification {
+  id?: number;
+  name?: string;
+  implementation?: string;
+  enabled?: boolean;
+  tags?: number[];
+  configJson?: string;
+}
+
 export default function NotificationsSettings({ showAdvanced: _showAdvanced = false }: NotificationsSettingsProps) {
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [, setLoading] = useState(true);
@@ -268,7 +279,7 @@ export default function NotificationsSettings({ showAdvanced: _showAdvanced = fa
       if (response.ok) {
         const data = await response.json();
         // Parse configJson for each notification
-        const parsedNotifications = data.map((n: any) => ({
+        const parsedNotifications = (data as StoredNotification[]).map((n) => ({
           ...n,
           ...(n.configJson ? JSON.parse(n.configJson) : {})
         }));
@@ -347,7 +358,7 @@ export default function NotificationsSettings({ showAdvanced: _showAdvanced = fa
     });
   };
 
-  const handleFormChange = (field: keyof Notification, value: any) => {
+  const handleFormChange = <K extends keyof Notification>(field: K, value: Notification[K]) => {
     setFormData(prev => ({ ...prev, [field]: value }));
   };
 
@@ -359,7 +370,7 @@ export default function NotificationsSettings({ showAdvanced: _showAdvanced = fa
     try {
       // Separate API fields from config fields
       const { id, name, implementation, enabled, tags, ...config } = formData as Partial<Notification>;
-      const { _headerPairs, ...cleanConfig } = config as any;
+      const { _headerPairs, ...cleanConfig } = config as Record<string, unknown> & { _headerPairs?: string };
       const notificationConfig: NotificationConfig = cleanConfig;
 
       const payload = {
@@ -777,7 +788,7 @@ export default function NotificationsSettings({ showAdvanced: _showAdvanced = fa
                             if (raw) {
                               const parsed = JSON.parse(raw);
                               if (Array.isArray(parsed)) {
-                                headerPairs = parsed.map((p: any) => ({ key: p.key || '', value: p.value || '' }));
+                                headerPairs = parsed.map((p: { key?: string; value?: string }) => ({ key: p.key || '', value: p.value || '' }));
                               } else {
                                 headerPairs = Object.entries(parsed).map(([k, v]) => ({ key: k, value: String(v) }));
                               }
@@ -799,7 +810,7 @@ export default function NotificationsSettings({ showAdvanced: _showAdvanced = fa
                           // Prefer raw pairs from UI state if available
                           let displayPairs = headerPairs;
                           try {
-                            const rawPairs = (formData as any)._headerPairs;
+                            const rawPairs = (formData as { _headerPairs?: string })._headerPairs;
                             if (rawPairs) {
                               displayPairs = JSON.parse(rawPairs);
                             }
@@ -835,7 +846,7 @@ export default function NotificationsSettings({ showAdvanced: _showAdvanced = fa
                                   <button
                                     type="button"
                                     onClick={() => {
-                                      const updated = displayPairs.filter((_: any, i: number) => i !== idx);
+                                      const updated = displayPairs.filter((_, i: number) => i !== idx);
                                       updateHeaders(updated.length > 0 ? updated : [{ key: '', value: '' }]);
                                     }}
                                     className="px-2 py-2 text-gray-400 hover:text-red-400 transition-colors"

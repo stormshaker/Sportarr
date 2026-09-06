@@ -7,6 +7,7 @@ import PageShell from '../components/PageShell';
 import { apiGet } from '../utils/api';
 import { getSportIcon } from '../utils/sportIcons';
 import { parseAsUtc } from '../utils/timezone';
+import type { AddEventModalEvent } from '../components/AddEventModal';
 
 // Sport categories for filtering
 const SPORT_FILTERS = [
@@ -46,7 +47,7 @@ export default function EventSearchPage() {
   const [selectedSport, setSelectedSport] = useState('Soccer');
   const [selectedDate, setSelectedDate] = useState(getTodayDateString());
   const [searchQuery, setSearchQuery] = useState('');
-  const [selectedEvent, setSelectedEvent] = useState<any>(null);
+  const [selectedEvent, setSelectedEvent] = useState<AddEventModalEvent | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
 
   // Fetch TV schedule for selected sport and date

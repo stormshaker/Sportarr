@@ -64,6 +64,20 @@ interface UpdateSettings {
   scriptPath: string;
 }
 
+// The parsed settings snapshot taken at load, which the unsaved-changes
+// check compares the current form against. Each section is a JSON blob the
+// API sends as a string, so the parsed shape is whatever that section holds.
+interface LoadedSettings {
+  host: HostSettings | null;
+  security: SecuritySettings | null;
+  proxy: ProxySettings | null;
+  logging: LoggingSettings | null;
+  analytics: AnalyticsSettings | null;
+  backup: BackupSettings | null;
+  // Only written on save; the load path does not parse an update section.
+  update?: UpdateSettings;
+}
+
 export default function GeneralSettings({ showAdvanced = false }: GeneralSettingsProps) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -72,7 +86,7 @@ export default function GeneralSettings({ showAdvanced = false }: GeneralSetting
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
 
   // Track initial values to detect changes
-  const initialValues = useRef<any>(null);
+  const initialValues = useRef<LoadedSettings | null>(null);
 
   // Use unsaved changes hook
   useUnsavedChanges(hasUnsavedChanges);

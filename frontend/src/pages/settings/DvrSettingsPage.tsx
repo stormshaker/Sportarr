@@ -210,6 +210,10 @@ function encodingSettingsFrom(data: DvrSettings) {
   };
 }
 
+// The encoding block of the DVR settings, inferred from the state that holds
+// it so the two cannot drift.
+type EncodingSettings = ReturnType<typeof encodingSettingsFrom>;
+
 export default function DvrSettingsPage() {
   // State
   // FFmpeg state
@@ -378,7 +382,7 @@ export default function DvrSettingsPage() {
 
 
   // Handle encoding setting change (for inline settings)
-  const handleEncodingSettingChange = (field: string, value: any) => {
+  const handleEncodingSettingChange = <K extends keyof EncodingSettings>(field: K, value: EncodingSettings[K]) => {
     const updated = { ...currentEncodingSettings, [field]: value };
     setCurrentEncodingSettings(updated);
     // Also update dvrSettings so it gets saved
@@ -442,7 +446,7 @@ export default function DvrSettingsPage() {
     }
   };
 
-  const handleSettingsChange = (field: keyof DvrSettings, value: any) => {
+  const handleSettingsChange = <K extends keyof DvrSettings>(field: K, value: DvrSettings[K]) => {
     setDvrSettings(prev => ({ ...prev, [field]: value }));
   };
 

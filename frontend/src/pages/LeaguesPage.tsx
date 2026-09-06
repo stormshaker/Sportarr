@@ -207,7 +207,7 @@ export default function LeaguesPage() {
   }, [leagues]);
 
   // Selection mode helpers
-  const toggleLeagueSelection = (leagueId: number, e: React.MouseEvent) => {
+  const toggleLeagueSelection = (leagueId: number, e: React.SyntheticEvent) => {
     e.stopPropagation(); // Prevent navigation when clicking checkbox
     setSelectedLeagueIds(prev => {
       const next = new Set(prev);
@@ -427,7 +427,7 @@ export default function LeaguesPage() {
                       checked={isSelected}
                       onChange={(e) => {
                         e.stopPropagation();
-                        toggleLeagueSelection(league.id, e as any);
+                        toggleLeagueSelection(league.id, e);
                       }}
                       className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-red-600 focus:ring-red-500 cursor-pointer"
                     />

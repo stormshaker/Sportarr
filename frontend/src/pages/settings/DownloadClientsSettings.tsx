@@ -299,7 +299,7 @@ export default function DownloadClientsSettings({ showAdvanced: _showAdvanced = 
       setIsLoading(true);
       const response = await apiClient.get('/downloadclient');
       console.log('[DEBUG] Loaded download clients from API:', response.data);
-      response.data.forEach((client: any) => {
+      (response.data as DownloadClient[]).forEach((client) => {
         console.log(`[DEBUG] Client: ${client.name}, Type: ${client.type}, Protocol: ${getProtocol(client.type)}, UrlBase: ${client.urlBase}`);
       });
       setDownloadClients(response.data);
@@ -553,21 +553,26 @@ export default function DownloadClientsSettings({ showAdvanced: _showAdvanced = 
     });
   };
 
-  const handleFormChange = (field: keyof DownloadClient, value: any) => {
+  const handleFormChange = <K extends keyof DownloadClient>(field: K, value: DownloadClient[K]) => {
     // Auto-strip protocol from host field (users commonly paste full URLs like http://192.168.1.5)
     // If they paste https://, also enable UseSsl so the secure intent is preserved
     if (field === 'host' && typeof value === 'string') {
       const hadHttps = /^https:\/\//i.test(value);
       const hadHttp = /^http:\/\//i.test(value);
-      value = value.replace(/^https?:\/\//i, '').replace(/\/+$/, '').replace(/:[\d]+$/, '');
+      // A local rather than reassigning the parameter: value is typed to the
+      // field being set, and the compiler cannot know that field === 'host'
+      // narrows K to a string-valued key.
+      const host = value.replace(/^https?:\/\//i, '').replace(/\/+$/, '').replace(/:[\d]+$/, '');
       if (hadHttps) {
-        setFormData(prev => ({ ...prev, host: value, useSsl: true }));
+        setFormData(prev => ({ ...prev, host, useSsl: true }));
         return;
       }
       if (hadHttp) {
-        setFormData(prev => ({ ...prev, host: value, useSsl: false }));
+        setFormData(prev => ({ ...prev, host, useSsl: false }));
         return;
       }
+      setFormData(prev => ({ ...prev, host }));
+      return;
     }
     setFormData(prev => ({ ...prev, [field]: value }));
   };

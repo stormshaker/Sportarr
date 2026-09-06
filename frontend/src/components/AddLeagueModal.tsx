@@ -27,7 +27,7 @@ interface Team {
   strTeamShort?: string;
 }
 
-interface League {
+export interface League {
   idLeague: string;
   strLeague: string;
   strSport: string;
@@ -92,6 +92,13 @@ interface AddLeagueModalProps {
 
 // Sport-classification helpers live in utils/leagueSportRules so the modal's
 // display logic and the league pages' save logic share one source of truth.
+
+// A league-to-team join row: the team is only present when the row still
+// resolves to one, which is why the filter checks for it.
+interface MonitoredTeamLink {
+  monitored: boolean;
+  team?: { externalId: string };
+}
 
 export default function AddLeagueModal({ league, isOpen, onClose, onAdd, isAdding, editMode = false, leagueId }: AddLeagueModalProps) {
   const [selectedTeamIds, setSelectedTeamIds] = useState<Set<string>>(new Set());
@@ -405,8 +412,8 @@ export default function AddLeagueModal({ league, isOpen, onClose, onAdd, isAddin
       initializedTeamsRef.current = true;
 
       const monitoredExternalIds = existingLeague.monitoredTeams
-        .filter((mt: any) => mt.monitored && mt.team)
-        .map((mt: any) => mt.team.externalId);
+        .filter((mt: MonitoredTeamLink) => mt.monitored && mt.team)
+        .map((mt: MonitoredTeamLink) => mt.team!.externalId);
       setSelectedTeamIds(new Set(monitoredExternalIds));
       setSelectAll(monitoredExternalIds.length === teams.length);
     }

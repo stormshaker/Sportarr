@@ -21,6 +21,7 @@ import PageHeader from '../../components/PageHeader';
 import PageShell from '../../components/PageShell';
 import EpgSourcesPanel from '../../components/EpgSourcesPanel';
 import { errorMessage } from '../../utils/errors';
+import type { AxiosResponse } from 'axios';
 
 // IPTV Source Types
 type IptvSourceType = 'M3U' | 'Xtream';
@@ -419,7 +420,7 @@ export default function IptvSettings() {
       const offset = page * CHANNEL_PAGE_SIZE;
 
       // Only load stats and groups on first page
-      const requests: Promise<any>[] = [
+      const requests: Promise<AxiosResponse<unknown>>[] = [
         apiClient.get<IptvChannel[]>(`/iptv/sources/${sourceId}/channels`, {
           params: {
             sportsOnly: channelFilter === 'sports' ? true : undefined,
@@ -440,7 +441,9 @@ export default function IptvSettings() {
 
       const results = await Promise.all(requests);
       if (seq !== channelLoadSeq.current) return;
-      const channelsData = Array.isArray(results[0].data) ? results[0].data : [];
+      // Positions are fixed by how the array is built above: [0] is always the
+      // channel page, and [1]/[2] are the stats and groups added for page 0.
+      const channelsData = (Array.isArray(results[0].data) ? results[0].data : []) as IptvChannel[];
 
       if (reset) {
         setChannels(channelsData);
@@ -452,8 +455,8 @@ export default function IptvSettings() {
       setHasMoreChannels(channelsData.length === CHANNEL_PAGE_SIZE);
 
       if (page === 0 && results.length > 1) {
-        setChannelStats(results[1].data);
-        setGroups(Array.isArray(results[2].data) ? results[2].data : []);
+        setChannelStats(results[1].data as ChannelStats);
+        setGroups(Array.isArray(results[2].data) ? (results[2].data as string[]) : []);
       }
     } catch (err) {
       if (seq !== channelLoadSeq.current) return;
@@ -463,7 +466,7 @@ export default function IptvSettings() {
     }
   };
 
-  const handleFormChange = (field: keyof SourceFormData, value: any) => {
+  const handleFormChange = <K extends keyof SourceFormData>(field: K, value: SourceFormData[K]) => {
     setFormData(prev => ({ ...prev, [field]: value }));
   };
 

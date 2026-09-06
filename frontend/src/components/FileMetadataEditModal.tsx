@@ -16,7 +16,14 @@ import { errorMessage } from '../utils/errors';
  * no modal, no API call here.
  */
 
-export interface FileMetadataEditModalProps {
+export // What the save returns for each file it wrote, which the caller merges back
+// into its own list by id.
+interface SavedFileMetadata {
+  id: number;
+  [field: string]: unknown;
+}
+
+interface FileMetadataEditModalProps {
   isOpen: boolean;
   onClose: () => void;
   /** Single file id, or list of ids for bulk-edit. */
@@ -27,7 +34,7 @@ export interface FileMetadataEditModalProps {
   /** Whether to show PartName/PartNumber. Hide for non-multi-part events. */
   showPartFields?: boolean;
   /** Called after a successful save with the updated EventFile DTOs. */
-  onSaved?: (updated: any[]) => void;
+  onSaved?: (updated: SavedFileMetadata[]) => void;
   /** Context for league-aware Part dropdowns + DB-known release-group list. */
   leagueId?: number;
   eventId?: number;
@@ -202,13 +209,20 @@ function stripUntouched(
     'languages', 'indexerFlags', 'partName', 'partNumber',
   ];
   for (const k of keys) {
-    const a = (current as any)[k];
-    const b = (initial as any)[k];
+    // k is drawn from the key list above, so both sides are the same property
+    // of the same shape; the assignment is what TypeScript cannot follow on
+    // its own across a union of value types.
+    const a = current[k];
+    const b = initial[k];
     if (k === 'languages') {
-      if (!arraysEqual(a ?? [], b ?? [])) out[k] = a as any;
+      if (!arraysEqual((a as string[]) ?? [], (b as string[]) ?? [])) {
+        out.languages = a as FileMetadataEditorValues['languages'];
+      }
       continue;
     }
-    if (a !== b) out[k] = a as any;
+    if (a !== b) {
+      Object.assign(out, { [k]: a });
+    }
   }
   return out;
 }
