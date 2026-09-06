@@ -20,4 +20,13 @@ export default defineConfig([
       globals: globals.browser,
     },
   },
+  {
+    // Test helpers are not part of the Vite module graph the dev server fast-
+    // refreshes, so the "only export components" rule has nothing to protect
+    // here — it just objects to a render helper sitting next to a re-export.
+    files: ['src/test/**/*.{ts,tsx}'],
+    rules: {
+      'react-refresh/only-export-components': 'off',
+    },
+  },
 ])

@@ -28,7 +28,7 @@ import { Suspense, useState, useEffect } from 'react';
 import FooterStatusBar from './FooterStatusBar';
 import MobileTabBar from './MobileTabBar';
 import OnboardingWizard from './OnboardingWizard';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuth } from '../contexts/useAuth';
 import { SETTINGS_PAGES } from '../pages/settings/settingsPages';
 import { useResolvedTheme } from '../hooks/useTheme';
 

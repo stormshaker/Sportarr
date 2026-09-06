@@ -13,7 +13,7 @@ import {
   LockClosedIcon,
   ExclamationTriangleIcon,
 } from '@heroicons/react/24/outline';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuth } from '../contexts/useAuth';
 import apiClient from '../api/client';
 import FileBrowserModal from './FileBrowserModal';
 

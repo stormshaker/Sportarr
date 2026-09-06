@@ -662,14 +662,14 @@ export default function LeagueSearchPage() {
                       <button
                         onMouseEnter={() => setHoveredLeagueId(league.idLeague)}
                         onMouseLeave={() => setHoveredLeagueId(null)}
-                        onClick={(e) => { e.stopPropagation(); addedLeagueInfo && openDeleteModal(addedLeagueInfo.id, league.strLeague); }}
+                        onClick={(e) => { e.stopPropagation(); if (addedLeagueInfo) openDeleteModal(addedLeagueInfo.id, league.strLeague); }}
                         className="rounded-lg border border-green-700 px-4 py-2 text-sm font-medium text-green-400 transition-colors hover:border-red-700 hover:bg-red-900/30 hover:text-red-300"
                         title="Remove from Library"
                       >
                         {hoveredLeagueId === league.idLeague ? 'Remove' : 'Added'}
                       </button>
                       <button
-                        onClick={(e) => { e.stopPropagation(); addedLeagueInfo && openEditModal(league, addedLeagueInfo.id); }}
+                        onClick={(e) => { e.stopPropagation(); if (addedLeagueInfo) openEditModal(league, addedLeagueInfo.id); }}
                         className={BUTTON_INFO}
                         title="Edit League"
                       >
@@ -858,7 +858,7 @@ export default function LeagueSearchPage() {
                               onMouseLeave={() => setHoveredLeagueId(null)}
                               onClick={(e) => {
                                 e.stopPropagation();
-                                addedLeagueInfo && openDeleteModal(addedLeagueInfo.id, league.strLeague);
+                                if (addedLeagueInfo) openDeleteModal(addedLeagueInfo.id, league.strLeague);
                               }}
                               className={`flex-1 py-2 rounded-lg font-medium border transition-all flex items-center justify-center gap-2 ${
                                 hoveredLeagueId === league.idLeague
@@ -872,7 +872,7 @@ export default function LeagueSearchPage() {
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
-                                addedLeagueInfo && openEditModal(league, addedLeagueInfo.id);
+                                if (addedLeagueInfo) openEditModal(league, addedLeagueInfo.id);
                               }}
                               className="px-4 py-2 rounded-lg font-medium bg-blue-600 hover:bg-blue-700 text-white transition-colors"
                             >

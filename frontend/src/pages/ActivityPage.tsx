@@ -1310,7 +1310,7 @@ export default function ActivityPage() {
             <div className="text-gray-400 text-xs truncate" title={formatDate(item.added)}>{formatDate(item.added)}</div>
           </td>
         );
-      case 'actions':
+      case 'actions': {
         const isUnmonitored = item.statusMessages?.some(msg => msg.includes('no longer monitored'));
         // Show import button for Warning (5) or Completed (3) status when unmonitored
         const canImport = isUnmonitored && (item.status === 5 || item.status === 3);
@@ -1361,6 +1361,7 @@ export default function ActivityPage() {
             </div>
           </td>
         );
+      }
       default:
         return null;
     }

@@ -23,6 +23,10 @@ describe('AddEventModal', () => {
     tapologyId: 'test-123',
     title: 'UFC 300',
     organization: 'UFC',
+    // The component branches on sport and treats a missing one as an API
+    // fault, rendering neither the combat nor the team layout. Without this
+    // the fixture exercised only the error path.
+    sport: 'Fighting',
     eventDate: '2024-04-13',
     venue: 'T-Mobile Arena',
     location: 'Las Vegas, Nevada',
@@ -36,6 +40,13 @@ describe('AddEventModal', () => {
       },
     ],
   };
+
+
+  // handleAdd refuses to submit without a quality profile and nothing
+  // preselects one, so a test that wants the submit path has to pick one.
+  async function selectQualityProfile(user: ReturnType<typeof userEvent.setup>) {
+    await user.selectOptions(screen.getByLabelText(/quality profile/i), '1');
+  }
 
   const mockOnClose = vi.fn();
   const mockOnSuccess = vi.fn();
@@ -161,14 +172,19 @@ describe('AddEventModal', () => {
       />
     );
 
+    await selectQualityProfile(user);
+
     const addButton = screen.getByRole('button', { name: /add event/i });
     await user.click(addButton);
 
     await waitFor(() => {
       expect(apiClient.post).toHaveBeenCalledWith('/events', expect.objectContaining({
-        tapologyId: 'test-123',
         title: 'UFC 300',
-        organization: 'UFC',
+        sport: 'Fighting',
+        eventDate: '2024-04-13',
+        venue: 'T-Mobile Arena',
+        location: 'Las Vegas, Nevada',
+        qualityProfileId: 1,
       }));
       expect(mockOnSuccess).toHaveBeenCalledTimes(1);
       expect(mockOnClose).toHaveBeenCalledTimes(1);
@@ -190,6 +206,8 @@ describe('AddEventModal', () => {
         onSuccess={mockOnSuccess}
       />
     );
+
+    await selectQualityProfile(user);
 
     const addButton = screen.getByRole('button', { name: /add event/i });
     await user.click(addButton);
@@ -231,6 +249,8 @@ describe('AddEventModal', () => {
         onSuccess={mockOnSuccess}
       />
     );
+
+    await selectQualityProfile(user);
 
     const addButton = screen.getByRole('button', { name: /add event/i });
 
