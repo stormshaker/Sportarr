@@ -396,9 +396,31 @@ public class HubChangesPollerService : BackgroundService
         }
         else if (cursor != settings.HubChangesCursor)
         {
-            settings.HubChangesCursor = cursor;
-            await db.SaveChangesAsync(cancellationToken);
-            _logger.LogDebug("[Changes Poller] Cursor advanced to {Cursor}", cursor);
+            // Re-read the row before writing. The league refreshes above run on
+            // this scope's DbContext, and LeagueEventSyncService clears its
+            // change tracker after every season save to keep DetectChanges off
+            // the entities it has already written. That clear also detaches the
+            // `settings` instance loaded at the top of this cycle, so assigning
+            // to it and saving wrote nothing at all - no exception, no warning,
+            // just a cursor that never moved. The poller then re-fetched the
+            // same window of changes forever, and the only leagues that kept
+            // getting refreshed were the ones that happened to fall inside it;
+            // everything else silently stopped receiving scores, statuses,
+            // reschedules and new events. Reloading gives us a tracked entity
+            // whether or not a refresh ran this cycle.
+            var tracked = await db.AppSettings.FirstOrDefaultAsync(cancellationToken);
+            if (tracked == null)
+            {
+                _logger.LogWarning(
+                    "[Changes Poller] AppSettings row vanished mid-cycle; holding the cursor at {Cursor}",
+                    settings.HubChangesCursor);
+            }
+            else
+            {
+                tracked.HubChangesCursor = cursor;
+                await db.SaveChangesAsync(cancellationToken);
+                _logger.LogDebug("[Changes Poller] Cursor advanced to {Cursor}", cursor);
+            }
         }
 
         if (totalChanges == 0)
