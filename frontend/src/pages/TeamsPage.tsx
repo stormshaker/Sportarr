@@ -53,8 +53,6 @@ const MONITOR_OPTIONS = [
 ];
 
 const TABLE_ROW_HOVER = 'text-sm transition-colors hover:bg-gray-800/50';
-const TEAM_NAME_COLLATOR = new Intl.Collator(undefined, { sensitivity: 'base' });
-
 // A picker is for finding one team, not for scrolling past seventeen thousand.
 // Rendering the whole filtered set put a quarter of a million nodes on the
 // page and made every keystroke a multi-second freeze.
@@ -133,12 +131,28 @@ export default function TeamsPage() {
 
   const [isRefreshing, setIsRefreshing] = useState(false);
 
-  const { data: allTeams = [], isLoading: isLoadingTeams } = useQuery({
-    queryKey: ['all-teams'],
-    queryFn: async () => {
-      const response = await apiClient.get<TeamApiResponse[]>('/teams/all');
+  // Deferring the search term keeps the input painting while the request for
+  // the next page is in flight, and coalesces a burst of keystrokes into far
+  // fewer round trips than one per character.
+  const deferredSearchQuery = useDeferredValue(searchQuery);
 
-      return (Array.isArray(response.data) ? response.data : []).map((team): Team => ({
+  // Ask the server for the page we are going to draw instead of the whole
+  // catalog. Fetching all 17k teams cost ~10 MB and several seconds before
+  // the picker could paint, to then show 200 of them.
+  const { data: teamsPage, isLoading: isLoadingTeams, isFetching: isFetchingTeams } = useQuery({
+    queryKey: ['all-teams', deferredSearchQuery, selectedSport],
+    queryFn: async () => {
+      const params = new URLSearchParams({ limit: String(MAX_RENDERED_TEAMS) });
+      if (deferredSearchQuery.trim()) params.set('q', deferredSearchQuery.trim());
+      if (selectedSport !== 'all') params.set('sports', selectedSport);
+
+      const response = await apiClient.get<TeamApiResponse[]>(`/teams/all?${params.toString()}`);
+
+      // Total before the server truncated, so the count line can say how many
+      // more a narrower search would reach.
+      const matched = Number.parseInt(response.headers['x-total-count'] ?? '', 10);
+
+      const teams = (Array.isArray(response.data) ? response.data : []).map((team): Team => ({
         id: team.Id ?? team.id ?? 0,
         externalId: team.idTeam,
         name: team.strTeam ?? '',
@@ -150,10 +164,18 @@ export default function TeamsPage() {
         formedYear: team.intFormedYear ? Number.parseInt(team.intFormedYear, 10) : undefined,
         added: team.Added ?? team.added ?? new Date().toISOString(),
       }));
+
+      return { teams, matched: Number.isFinite(matched) ? matched : teams.length };
     },
     staleTime: 30 * 60 * 1000, // 30 min - backend caches for hours, no need for frequent refetches
     refetchOnWindowFocus: false,
+    // Keeping the previous page on screen while the next one loads stops the
+    // list flashing empty on every keystroke.
+    placeholderData: (previous) => previous,
   });
+
+  const allTeams = useMemo(() => teamsPage?.teams ?? [], [teamsPage]);
+  const matchedTeamCount = teamsPage?.matched ?? 0;
 
   const handleRefreshTeams = async () => {
     setIsRefreshing(true);
@@ -204,42 +226,9 @@ export default function TeamsPage() {
     return ids;
   }, [followedTeams]);
 
-  // Typing re-runs the filter over every team the catalog holds — 17k of them
-  // on a normal install. Deferring the value lets React keep the input painting
-  // while the list catches up, instead of blocking the keystroke on the sort
-  // and re-render behind it.
-  const deferredSearchQuery = useDeferredValue(searchQuery);
-
-  const filteredTeams = useMemo(() => {
-    if (!Array.isArray(allTeams)) return [];
-    let filtered = allTeams;
-
-    if (selectedSport !== 'all') {
-      // Exact match, not substring: with more sport filters added, a
-      // substring check would let "Football" match "Australian Football"
-      // teams too (same trap fixed backend-side in the bulk team fetch).
-      filtered = filtered.filter((team) =>
-        team.sport?.toLowerCase() === selectedSport.toLowerCase()
-      );
-    }
-
-    if (deferredSearchQuery.trim()) {
-      const query = deferredSearchQuery.toLowerCase();
-      filtered = filtered.filter((team) =>
-        team.name?.toLowerCase().includes(query) ||
-        team.shortName?.toLowerCase().includes(query) ||
-        team.alternateName?.toLowerCase().includes(query) ||
-        team.country?.toLowerCase().includes(query)
-      );
-    }
-
-    return filtered
-      .filter((team) => {
-        const name = team.name ?? '';
-        return !name.startsWith('_') && !name.endsWith('_');
-      })
-      .sort((a, b) => TEAM_NAME_COLLATOR.compare(a.name ?? '', b.name ?? ''));
-  }, [allTeams, deferredSearchQuery, selectedSport]);
+  // Searching, the placeholder-row exclusion and the ordering all happen
+  // server-side now; what arrives is already the page to draw.
+  const filteredTeams = allTeams;
 
   const followTeamMutation = useMutation({
     mutationFn: async (team: Team) => apiClient.post<FollowedTeam>('/followed-teams', {
@@ -607,7 +596,7 @@ export default function TeamsPage() {
       }
     );
 
-    const renderedData = tableData.slice(0, MAX_RENDERED_TEAMS);
+    const renderedData = tableData;
 
     const visibleColumnCount = TEAM_COLUMN_DEFS.filter((column) => isVisible(column.key)).length;
 
@@ -890,10 +879,11 @@ export default function TeamsPage() {
           </select>
         </div>
         <p className="mb-6 text-sm text-gray-500">
-          Showing {isLoadingTeams ? '...' : Math.min(filteredTeams.length, MAX_RENDERED_TEAMS)} of {filteredTeams.length}
+          Showing {isLoadingTeams ? '...' : filteredTeams.length} of {matchedTeamCount}
           {searchQuery ? ` teams matching "${searchQuery}"` : ` teams`}
           {selectedSport !== 'all' && ` in ${SPORT_FILTERS.find((sport) => sport.id === selectedSport)?.name}`}
-          {filteredTeams.length > MAX_RENDERED_TEAMS && ' — search to narrow the list'}
+          {matchedTeamCount > filteredTeams.length && ' — search to narrow the list'}
+          {isFetchingTeams && !isLoadingTeams && ' · updating…'}
         </p>
 
         {isLoadingTeams && (
@@ -921,7 +911,7 @@ export default function TeamsPage() {
               renderCompactTable()
             ) : filteredTeams.length > 0 ? (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {filteredTeams.slice(0, MAX_RENDERED_TEAMS).map((team) => {
+                {filteredTeams.map((team) => {
                   const isFollowed = team.externalId ? followedTeamIds.has(team.externalId) : false;
                   const isExpanded = expandedTeamId === team.externalId;
                   const followedTeam = team.externalId ? getFollowedTeam(team.externalId) : null;
