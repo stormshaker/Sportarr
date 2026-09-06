@@ -1,0 +1,98 @@
+name: Checks
+
+# Lint, typecheck and the full test suite, on the PR branch — so a change is
+# known good before it reaches main and the image build publishes :latest to
+# the tag the NAS pulls.
+#
+# Deliberately builds no image and pushes nothing to ghcr: none of this needs
+# Docker packaging, and keeping it separate means a PR gets a signal in a
+# couple of minutes without publishing anything. Fork Image (ghcr.io) stays
+# as it is and still runs on main and fix/** pushes.
+#
+# Note this is NOT enforced until main is given a branch protection rule
+# requiring these checks — until then it reports, and merging past a red run
+# is still possible.
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+# A new push to a PR makes the in-flight run for that PR pointless.
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: .NET build + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      # setup-dotnet installs alongside the runner's preinstalled SDKs rather
+      # than replacing them, and with no global.json in the repo the CLI picks
+      # the newest it can see, which fails to restore this net8.0 solution.
+      # Same runtime-generated pin the image workflow uses, and for the same
+      # reason it is generated rather than committed: a global.json in the
+      # tree would also pin every local dev build.
+      - name: Pin SDK 8 for this build
+        run: |
+          printf '%s\n' '{ "sdk": { "version": "8.0.100", "rollForward": "latestFeature" } }' > global.json
+          dotnet --version
+
+      # SkipFrontendBuild because the frontend job below covers it, and the
+      # backend job has no Node set up.
+      - name: Build solution
+        run: dotnet build Sportarr.sln -c Release -p:SkipFrontendBuild=true --nologo
+
+      - name: Test
+        run: |
+          dotnet test tests/Sportarr.Api.Tests/Sportarr.Api.Tests.csproj \
+            -c Release --no-build -p:SkipFrontendBuild=true --nologo \
+            --logger "trx;LogFileName=test-results.trx" \
+            --results-directory TestResults
+
+      # Uploaded even on failure — the trx is how you see which of the ~190
+      # test classes broke without scrolling the whole job log.
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dotnet-test-results
+          path: TestResults/
+          if-no-files-found: warn
+
+  frontend:
+    name: Frontend lint + typecheck + tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      # tsc -b alone, rather than `npm run build` (tsc -b && vite build) —
+      # the type errors are what matter here and bundling is the image
+      # workflow's job.
+      - name: Typecheck
+        run: npx tsc -b
+
+      - name: Test
+        run: npx vitest run
