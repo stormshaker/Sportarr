@@ -131,6 +131,28 @@ public sealed class RequestBudgetBaselineTests
     }
 
     [Fact]
+    public async Task EachRetryGetsItsOwnRequestTimeout()
+    {
+        // Two 503s, a 3s request delay and a 5s request timeout. The third
+        // attempt is due about 7s in. While the timeout covered the whole retry
+        // chain it was never sent; each attempt now gets its own 5s.
+        await using var rig = await RequestBudgetBaselineHarness.CreateAsync(_output);
+        await rig.SetIndexerTimeoutAsync(5);
+        rig.Source.FailuresBeforeSuccess = 2;
+        var row = rig.Row("Retry row", IndexerType.Newznab);
+        row.RequestDelayMs = 3000;
+        await rig.SaveRowsAsync(row);
+
+        var releases = await rig.SearchOneAsync(row).WaitAsync(RequestBudgetBaselineHarness.Deadline);
+
+        using (new AssertionScope())
+        {
+            rig.Source.Attempts.Select(attempt => attempt.Status).Should().Equal(503, 503, 200);
+            releases.Select(release => release.Guid).Should().Equal("offer-source-a-account-a-default");
+        }
+    }
+
+    [Fact]
     public async Task RetriedHttpAttemptsConsumeQuotaAndKeepPacing()
     {
         await using var rig = await RequestBudgetBaselineHarness.CreateAsync(_output);
