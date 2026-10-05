@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Sportarr.Api.Data;
+using Sportarr.Api.Helpers;
 using Sportarr.Api.Models;
 using Sportarr.Api.Services;
 using Sportarr.Api.Services.Interfaces;
@@ -13,6 +14,16 @@ namespace Sportarr.Api.Endpoints;
 
 public static class FollowedTeamsAndTeamsEndpoints
 {
+    // The Follow page table's sortable, filterable columns, keyed by the
+    // field names the endpoint returns.
+    private static readonly Dictionary<string, Func<Team, string?>> TeamCatalogColumns =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["strTeam"] = t => t.Name,
+            ["strSport"] = t => t.Sport,
+            ["strCountry"] = t => t.Country,
+        };
+
     public static IEndpointRouteBuilder MapFollowedTeamsAndTeamsEndpoints(this IEndpointRouteBuilder app)
     {
 // API: Get supported sports for team following
@@ -667,8 +678,14 @@ app.MapGet("/api/teams/search/{query}", async (string query, SportarrApiClient s
 });
 
 // API: Get all teams for supported sports (see TeamLeagueDiscoveryService.SupportedSports)
-// Used by the Add Team page to show all teams that can be followed
-app.MapGet("/api/teams/all", async (string? sports, bool? refresh, SportarrApiClient sportsDbClient, ILogger<Program> logger) =>
+// Used by the Add Team page to show all teams that can be followed.
+// Search, sport, column filters, sort and limit are applied here rather than
+// in the browser (see CatalogQuery). The whole catalog is about 17,000 teams
+// and 10 MB, which the page used to download before it could show anything.
+// `sports` still chooses which sports are fetched from the metadata server;
+// `sport` filters the cached result, so changing the sport chip costs no
+// upstream request.
+app.MapGet("/api/teams/all", async (HttpContext http, string? sports, bool? refresh, SportarrApiClient sportsDbClient, ILogger<Program> logger) =>
 {
     // Parse optional sports filter (comma-separated list)
     var sportsList = !string.IsNullOrEmpty(sports)
@@ -683,11 +700,21 @@ app.MapGet("/api/teams/all", async (string? sports, bool? refresh, SportarrApiCl
     if (results == null || !results.Any())
     {
         logger.LogWarning("[TEAMS ALL] No teams found for sports: {Sports}", sportsForLog);
-        return Results.Ok(new List<object>());
+        CatalogQuery.WriteCountHeaders(http.Response, 0, 0);
+        return Results.Ok(new List<Team>());
     }
 
-    logger.LogInformation("[TEAMS ALL] Found {Count} unique teams for sports: {Sports}", results.Count, sportsForLog);
-    return Results.Ok(results);
+    var page = CatalogQuery.FromRequest(http.Request.Query).Apply(
+        results,
+        name: t => t.Name,
+        sport: t => t.Sport,
+        searchFields: t => [t.Name, t.ShortName, t.AlternateName, t.Country],
+        columns: TeamCatalogColumns);
+
+    CatalogQuery.WriteCountHeaders(http.Response, page.Matched, page.Catalog);
+    logger.LogInformation("[TEAMS ALL] Returning {Returned} of {Matched} teams ({Cached} cached) for sports: {Sports}",
+        page.Rows.Count, page.Matched, results.Count, sportsForLog);
+    return Results.Ok(page.Rows);
 });
 
         return app;

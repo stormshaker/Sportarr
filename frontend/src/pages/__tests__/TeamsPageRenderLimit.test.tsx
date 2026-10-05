@@ -23,9 +23,26 @@ const teams = Array.from({ length: 90 }, (_, index) => ({
   strTeamBadge: `https://badges.example/${index}.png`,
 }));
 
+// Stands in for /api/teams/all, which searches, filters, sorts and pages the
+// catalog on the server. Only what these tests exercise is modelled.
+function serveTeams(path: string) {
+  const url = new URL(path, 'http://sportarr.test');
+  if (url.pathname !== '/teams/all') return null;
+  const q = (url.searchParams.get('q') ?? '').toLowerCase();
+  const nameFilter = (url.searchParams.get('filter.strTeam') ?? '').toLowerCase();
+  const matched = teams.filter((team) =>
+    team.strTeam.toLowerCase().includes(q) && team.strTeam.toLowerCase().includes(nameFilter));
+  const limit = Number(url.searchParams.get('limit') ?? matched.length);
+  return {
+    data: matched.slice(0, limit),
+    headers: { 'x-total-count': String(matched.length), 'x-catalog-count': String(teams.length) },
+  };
+}
+
 async function renderTeamsPage() {
   transport.get.mockImplementation(async (path: string) => {
-    if (path === '/teams/all') return { data: teams };
+    const page = serveTeams(path);
+    if (page) return page;
     if (path === '/followed-teams') return { data: [] };
     if (path === '/qualityprofile') return { data: [] };
     throw new Error('Unconfigured page request ' + path);
@@ -43,7 +60,8 @@ async function renderTeamsPage() {
 describe('teams page render limit', () => {
   it('preselects new leagues but leaves existing library leagues for an explicit choice', async () => {
     transport.get.mockImplementation(async (path: string) => {
-      if (path === '/teams/all') return { data: teams };
+      const page = serveTeams(path);
+      if (page) return page;
       if (path === '/followed-teams') return { data: [{ id: 1, externalId: '1000', name: 'Team 000', sport: 'Soccer' }] };
       if (path === '/qualityprofile') return { data: [{ id: 1, name: 'Any' }] };
       if (path === '/followed-teams/1/leagues') return { data: { leagues: [
@@ -76,7 +94,7 @@ describe('teams page render limit', () => {
 
     fireEvent.click(screen.getByText('Show more (30 remaining)'));
 
-    expect(screen.getByText('Team 089')).toBeInTheDocument();
+    expect(await screen.findByText('Team 089')).toBeInTheDocument();
     expect(screen.getAllByAltText(/^Team \d{3}$/)).toHaveLength(90);
     expect(screen.getByText('Showing 90 of 90 teams')).toBeInTheDocument();
     expect(screen.queryByText(/Show more/)).not.toBeInTheDocument();
@@ -94,7 +112,7 @@ describe('teams page render limit', () => {
       fireEvent.click(screen.getAllByTitle('Filter')[0]);
       fireEvent.change(screen.getByPlaceholderText('Filter...'), { target: { value: 'Team 089' } });
 
-      expect(screen.getByText('Team 089')).toBeInTheDocument();
+      expect(await screen.findByText('Team 089')).toBeInTheDocument();
       expect(screen.getAllByRole('row')).toHaveLength(2);
       expect(screen.getByText('Showing 1 of 1 team (90 total)')).toBeInTheDocument();
       expect(screen.queryByText(/Show more/)).not.toBeInTheDocument();
@@ -110,6 +128,34 @@ describe('teams page render limit', () => {
 
     expect(await screen.findByText('Team 089')).toBeInTheDocument();
     expect(screen.queryByText(/Show more/)).not.toBeInTheDocument();
+  });
+
+  it('asks the server for one page rather than the whole catalog', async () => {
+    await renderTeamsPage();
+
+    const teamRequests = transport.get.mock.calls
+      .map(([path]) => String(path))
+      .filter((path) => path.startsWith('/teams/all'));
+    expect(teamRequests.length).toBeGreaterThan(0);
+    expect(teamRequests.every((path) => new URL(path, 'http://sportarr.test').searchParams.get('limit') === '60')).toBe(true);
+  });
+
+  it('sends the compact column sort to the server', async () => {
+    const viewport = vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(800);
+    try {
+      await renderTeamsPage();
+
+      fireEvent.click(screen.getByText('Team'));
+
+      await vi.waitFor(() => {
+        const last = String(transport.get.mock.calls.filter(([path]) => String(path).startsWith('/teams/all')).at(-1)?.[0]);
+        const params = new URL(last, 'http://sportarr.test').searchParams;
+        expect(params.get('sort')).toBe('strTeam');
+        expect(params.get('dir')).toBe('desc');
+      });
+    } finally {
+      viewport.mockRestore();
+    }
   });
 
   it('lazy loads team badges', async () => {
