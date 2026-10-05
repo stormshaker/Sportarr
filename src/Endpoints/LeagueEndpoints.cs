@@ -30,6 +30,17 @@ public static class LeagueEndpoints
     private static readonly ConcurrentDictionary<int, DateTime> _refreshCooldowns = new();
     private static readonly TimeSpan _refreshCooldown = TimeSpan.FromMinutes(5);
 
+    // The Add League table's sortable, filterable columns, keyed by the
+    // field names the endpoint returns.
+    private static readonly Dictionary<string, Func<SportarrLeagueDto, string?>> LeagueCatalogColumns =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["strLeague"] = l => l.StrLeague,
+            ["strSport"] = l => l.StrSport,
+            ["strCountry"] = l => l.StrCountry,
+            ["intFormedYear"] = l => l.IntFormedYear,
+        };
+
     internal static async Task<RefreshEventsRequest?> ReadRefreshEventsRequestAsync(HttpRequest request)
     {
         using var reader = new StreamReader(request.Body, leaveOpen: true);
@@ -1727,21 +1738,61 @@ app.MapGet("/api/search/available-tokens", (ILogger<Program> logger) =>
 });
 
 // API: Get all leagues from Sportarr API (cached)
-app.MapGet("/api/leagues/all", async (SportarrApiClient sportsDbClient, ILogger<Program> logger) =>
+// Search, sport, column filters, sort and limit are applied here rather than
+// in the browser (see CatalogQuery). Without them this serves the whole
+// catalog, about 1,500 leagues and 900 KB, which the Add League page used to
+// download and then re-filter on every keystroke.
+app.MapGet("/api/leagues/all", async (HttpContext http, SportarrApiClient sportsDbClient, ILogger<Program> logger) =>
 {
     var results = await sportsDbClient.GetAllLeaguesAsync();
 
     if (results == null || !results.Any())
     {
         logger.LogWarning("[LEAGUES] No leagues found in cache");
-        return Results.Ok(new List<object>());
+        CatalogQuery.WriteCountHeaders(http.Response, 0, 0);
+        return Results.Ok(new List<SportarrLeagueDto>());
     }
 
-    logger.LogDebug("[LEAGUES] Returning {Count} leagues", results.Count);
-
     // Convert to DTO to ensure correct field names for frontend (strBadge, strLogo, etc.)
-    var dtos = results.Select(SportarrLeagueDto.FromLeague).ToList();
-    return Results.Ok(dtos);
+    var dtos = results.Select(SportarrLeagueDto.FromLeague);
+    var page = CatalogQuery.FromRequest(http.Request.Query).Apply(
+        dtos,
+        name: l => l.StrLeague,
+        sport: l => l.StrSport,
+        searchFields: l => [l.StrLeague, l.StrLeagueAlternate, l.StrSport, l.StrCountry],
+        columns: LeagueCatalogColumns);
+
+    CatalogQuery.WriteCountHeaders(http.Response, page.Matched, page.Catalog);
+    logger.LogDebug("[LEAGUES] Returning {Returned} of {Matched} leagues", page.Rows.Count, page.Matched);
+    return Results.Ok(page.Rows);
+});
+
+// The sport chips on the Add League page used to be derived from the full
+// catalog the client held. Now that it only receives a filtered page, the
+// chip list has to come from somewhere that does not move when the filter
+// does — otherwise choosing a sport narrows the chips to that sport and
+// there is no way back.
+app.MapGet("/api/leagues/sports", async (SportarrApiClient sportsDbClient) =>
+{
+    var results = await sportsDbClient.GetAllLeaguesAsync();
+    if (results == null || !results.Any())
+    {
+        return Results.Ok(new List<string>());
+    }
+
+    // The catalog ships the same sport with inconsistent casing
+    // ("Motorsport" vs "MotorSport"), which a plain distinct would render as
+    // two identical chips. Group case-insensitively and keep the lexically
+    // first spelling so the displayed casing is stable between syncs.
+    var sports = results
+        .Select(l => l.Sport)
+        .Where(sport => !string.IsNullOrWhiteSpace(sport))
+        .GroupBy(sport => sport!.ToLowerInvariant())
+        .Select(g => g.OrderBy(sport => sport, StringComparer.Ordinal).First()!)
+        .OrderBy(sport => sport, StringComparer.OrdinalIgnoreCase)
+        .ToList();
+
+    return Results.Ok(sports);
 });
 
 // API: Search leagues from Sportarr API
