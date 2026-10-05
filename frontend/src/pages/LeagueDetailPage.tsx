@@ -12,6 +12,7 @@ import EventFileDetailModal from '../components/EventFileDetailModal';
 import LeagueFilesModal from '../components/LeagueFilesModal';
 import TeamAliasesModal from '../components/TeamAliasesModal';
 import EventStatusBadge from '../components/EventStatusBadge';
+import { EVENTS_PER_PAGE, nextSeasonRenderLimit, seasonRenderLimit } from '../utils/seasonPaging';
 import { getEventLifecycle } from '../utils/eventStatus';
 import ManualImportModal from '../components/ManualImportModal';
 import RefreshScopeModal, { type RefreshScope } from '../components/RefreshScopeModal';
@@ -282,6 +283,7 @@ function fuzzyMatch(text: string, search: string): boolean {
   return searchIndex >= searchLower.length * 0.7;
 }
 
+
 export default function LeagueDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -331,6 +333,13 @@ export default function LeagueDetailPage() {
 
   // Track which seasons are expanded (default: none - user manually expands)
   const [expandedSeasons, setExpandedSeasons] = useState<Set<string>>(new Set());
+  // How many events each open season is currently showing. Absent means the
+  // first page; "Show more" adds another. Kept across a collapse so reopening
+  // a season you had scrolled into does not throw the extra rows away.
+  const [seasonRenderLimits, setSeasonRenderLimits] = useState<Record<string, number>>({});
+
+  const showMoreEvents = (season: string, shown: number, total: number) =>
+    setSeasonRenderLimits((prev) => ({ ...prev, [season]: nextSeasonRenderLimit(shown, total) }));
 
   // Deep-history leagues carry decades of catalog seasons; old ones the user
   // never touched are hidden behind a "Show all seasons" toggle (see
@@ -2046,6 +2055,13 @@ export default function LeagueDetailPage() {
               {/* Season Groups */}
               {visibleSeasons.map(season => {
                 const seasonEvents = groupedEvents[season] ?? [];
+                const renderLimit = seasonRenderLimit(
+                  seasonRenderLimits[season],
+                  seasonEvents,
+                  deepLinkedEvent && (deepLinkedEvent.season || 'Unknown') === season ? deepLinkedEvent.id : null
+                );
+                const visibleSeasonEvents = seasonEvents.slice(0, renderLimit);
+                const hiddenSeasonEventCount = seasonEvents.length - visibleSeasonEvents.length;
                 const isExpanded = expandedSeasons.has(season);
                 const summaryRow = seasonRows.find(row => row.season === season);
                 const seasonIsLoading = loadingSeasons.has(season);
@@ -2321,7 +2337,7 @@ export default function LeagueDetailPage() {
                         </div>
                         {/* Compact Event Rows */}
                         <div className="divide-y divide-red-900/20">
-                          {seasonEvents.map(event => {
+                          {visibleSeasonEvents.map(event => {
                             const hasFile = event.hasFile;
                             const lifecycle = getEventLifecycle({ status: event.status, eventDate: event.eventDate, hasFile });
                             const isCancelled = lifecycle === 'cancelled';
@@ -2593,13 +2609,25 @@ export default function LeagueDetailPage() {
                             );
                           })}
                         </div>
+
+                        {hiddenSeasonEventCount > 0 && (
+                          <div className="border-t border-red-900/20 px-3 py-2 text-center">
+                            <button
+                              onClick={() => showMoreEvents(season, renderLimit, seasonEvents.length)}
+                              className="text-sm text-red-400 transition-colors hover:text-red-300"
+                            >
+                              Show {Math.min(EVENTS_PER_PAGE, hiddenSeasonEventCount)} more
+                              <span className="ml-1 text-gray-500">({hiddenSeasonEventCount} not shown)</span>
+                            </button>
+                          </div>
+                        )}
                       </div>
                     )}
 
                     {/* Season Events - Spacious View */}
                     {isExpanded && !seasonIsLoading && !compactView && (
                       <div className="divide-y divide-red-900/30">
-                        {seasonEvents.map(event => {
+                        {visibleSeasonEvents.map(event => {
                 const hasFile = event.hasFile;
                 const eventDate = new Date(event.eventDate);
                 const isPast = eventDate < new Date();
@@ -3021,6 +3049,17 @@ export default function LeagueDetailPage() {
                     </div>
                 );
               })}
+                        {hiddenSeasonEventCount > 0 && (
+                          <div className="border-t border-red-900/30 px-3 py-3 text-center">
+                            <button
+                              onClick={() => showMoreEvents(season, renderLimit, seasonEvents.length)}
+                              className="text-sm text-red-400 transition-colors hover:text-red-300"
+                            >
+                              Show {Math.min(EVENTS_PER_PAGE, hiddenSeasonEventCount)} more
+                              <span className="ml-1 text-gray-500">({hiddenSeasonEventCount} not shown)</span>
+                            </button>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
