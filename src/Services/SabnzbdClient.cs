@@ -279,11 +279,18 @@ public class SabnzbdClient
             content.Add(fileContent, "nzbfile", filename);
 
             var requestUrl = $"{baseUrl}/api";
-            if (useQueryControlParams)
+            if (!useQueryControlParams && !string.IsNullOrWhiteSpace(category))
+            {
+                requestUrl += $"?category={Uri.EscapeDataString(category)}";
+            }
+            else if (useQueryControlParams)
             {
                 var addFileQuery = new System.Text.StringBuilder("?mode=addfile&output=json");
                 if (!string.IsNullOrWhiteSpace(category))
+                {
                     addFileQuery.Append($"&cat={Uri.EscapeDataString(category)}");
+                    content.Add(new StringContent(category), "category");
+                }
                 if (!string.IsNullOrWhiteSpace(apiKey))
                     addFileQuery.Append($"&apikey={Uri.EscapeDataString(apiKey)}");
                 else if (!string.IsNullOrWhiteSpace(config.Username) && !string.IsNullOrWhiteSpace(config.Password))
@@ -358,7 +365,8 @@ public class SabnzbdClient
     /// This method is intentionally separate from AddNzbAsync/AddNzbViaContentAsync so the
     /// normal SABnzbd routing remains unchanged.
     /// </summary>
-    public async Task<string?> AddNzbForDecypharrAsync(DownloadClient config, string nzbUrl, string category)
+    public async Task<string?> AddNzbForDecypharrAsync(
+        DownloadClient config, string nzbUrl, string category, string? expectedName = null)
     {
         try
         {
@@ -374,6 +382,10 @@ public class SabnzbdClient
 
             var nzbBytes = await response.Content.ReadAsByteArrayAsync();
             var filename = GetNzbFilename(response, nzbUrl);
+            var canonicalTitle = NormalizeDownloadTitle(expectedName);
+            var uploadFilename = string.IsNullOrEmpty(canonicalTitle)
+                ? filename
+                : canonicalTitle + ".nzb";
 
             _logger.LogInformation("[DecypharrUsenet] Downloaded NZB: {Filename} ({Size} bytes)", filename, nzbBytes.Length);
 
@@ -416,17 +428,9 @@ public class SabnzbdClient
             // {"status":false,"error":"No files uploaded"}.
             using var content = new MultipartFormDataContent();
 
-            // Both names in the form body too, for emulator versions that read it
-            // from there.
-            if (!string.IsNullOrWhiteSpace(category))
-            {
-                content.Add(new StringContent(category), "category");
-                content.Add(new StringContent(category), "cat");
-            }
-
             var fileContent = new ByteArrayContent(nzbBytes);
             fileContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/x-nzb");
-            content.Add(fileContent, "name", filename);
+            content.Add(fileContent, "name", uploadFilename);
 
             _logger.LogInformation("[DecypharrUsenet] Uploading NZB to: {Url}", Sportarr.Api.Helpers.SecretRedactor.Url(uploadUrl));
 
@@ -685,7 +689,7 @@ public class SabnzbdClient
                     {
                         DownloadId = item.nzo_id,
                         Title = item.filename,
-                        Category = item.category,
+                        Category = item.CategoryName,
                         FilePath = "", // Queue items don't have a storage path yet
                         Size = (long)(sizeMb * 1024 * 1024),
                         IsCompleted = false,
@@ -702,7 +706,7 @@ public class SabnzbdClient
         if (history != null)
         {
             foreach (var item in history.Where(h =>
-                h.category.Equals(category, StringComparison.OrdinalIgnoreCase) &&
+                h.CategoryName.Equals(category, StringComparison.OrdinalIgnoreCase) &&
                 h.status.Equals("Completed", StringComparison.OrdinalIgnoreCase)))
             {
                 if (seenIds.Add(item.nzo_id))
@@ -711,7 +715,7 @@ public class SabnzbdClient
                     {
                         DownloadId = item.nzo_id,
                         Title = item.name,
-                        Category = item.category,
+                        Category = item.CategoryName,
                         FilePath = item.storage,
                         Size = item.bytes,
                         IsCompleted = true,
@@ -726,6 +730,79 @@ public class SabnzbdClient
         }
 
         return results;
+    }
+
+    public async Task<(DownloadClientStatus? Status, string? NewDownloadId)> FindDownloadByTitleAsync(
+        DownloadClient config, string title, string? expectedCategory)
+    {
+        try
+        {
+            var normalizedTitle = NormalizeDownloadTitle(title);
+            if (string.IsNullOrEmpty(normalizedTitle))
+                return (null, null);
+
+            var candidates = new List<(string Id, string Title, string Category)>();
+            var queue = await GetQueueAsync(config);
+            if (queue != null)
+            {
+                candidates.AddRange(queue.Select(item =>
+                    (item.nzo_id, item.filename, item.CategoryName)));
+            }
+
+            var history = await GetHistoryAsync(config);
+            if (history != null)
+            {
+                candidates.AddRange(history.Select(item =>
+                    (item.nzo_id, item.name, item.CategoryName)));
+            }
+
+            var matches = candidates
+                .Where(candidate =>
+                    !string.IsNullOrWhiteSpace(candidate.Id) &&
+                    string.Equals(
+                        NormalizeDownloadTitle(candidate.Title),
+                        normalizedTitle,
+                        StringComparison.OrdinalIgnoreCase))
+                .DistinctBy(candidate => candidate.Id, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            var categoryMatches = string.IsNullOrWhiteSpace(expectedCategory)
+                ? matches
+                : matches.Where(candidate => string.Equals(
+                    candidate.Category,
+                    expectedCategory,
+                    StringComparison.OrdinalIgnoreCase)).ToList();
+            var eligibleMatches = categoryMatches.Count > 0 ? categoryMatches : matches;
+
+            if (eligibleMatches.Count != 1)
+            {
+                if (eligibleMatches.Count > 1)
+                {
+                    _logger.LogWarning(
+                        "[SABnzbd] Refusing ambiguous title recovery for {Title}. Found {Count} matching downloads",
+                        title, eligibleMatches.Count);
+                }
+
+                return (null, null);
+            }
+
+            var match = eligibleMatches[0];
+            var status = await GetDownloadStatusAsync(config, match.Id, expectedCategory);
+            return status == null ? (null, null) : (status, match.Id);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[SABnzbd] Error finding download by title: {Title}", title);
+            return (null, null);
+        }
+    }
+
+    private static string NormalizeDownloadTitle(string? title)
+    {
+        var normalized = title?.Trim() ?? "";
+        return normalized.EndsWith(".nzb", StringComparison.OrdinalIgnoreCase)
+            ? normalized[..^4]
+            : normalized;
     }
 
     /// <summary>
@@ -785,15 +862,8 @@ public class SabnzbdClient
     /// Get download status for monitoring (optimized with nzo_id filtering).
     /// </summary>
     /// <param name="expectedCategory">
-    /// The category this item was actually grabbed under (falls back to
-    /// config.Category when null). An nzo_id still existing in SABnzbd doesn't mean
-    /// it's still Sportarr's - SABnzbd is commonly shared across multiple *arr-style
-    /// apps, each scoped to its own category. If an item's category doesn't match,
-    /// it's reported as not found here rather than matched by nzo_id alone, so
-    /// download monitoring stops tracking it instead of polling another app's
-    /// download forever - the nzo_id never disappears, only its owner does. A blank
-    /// expected category (no scoping in use, on either side) skips the check and
-    /// preserves the previous nzo_id-only match.
+    /// The category this item was grabbed under. An exact nzo_id remains authoritative
+    /// when a compatible client reports a different category.
     /// </param>
     public async Task<DownloadClientStatus?> GetDownloadStatusAsync(DownloadClient config, string nzoId, string? expectedCategory = null)
     {
@@ -858,7 +928,9 @@ public class SabnzbdClient
             if (queueItem != null && !string.IsNullOrWhiteSpace(categoryToMatch) &&
                 !string.Equals(queueItem.CategoryName, categoryToMatch, StringComparison.OrdinalIgnoreCase))
             {
-                queueItem = null;
+                _logger.LogDebug(
+                    "[SABnzbd] Download {NzoId} has category '{Actual}' instead of '{Expected}'. Tracking its exact ID",
+                    nzoId, queueItem.CategoryName, categoryToMatch);
             }
 
             if (queueItem != null)
@@ -925,9 +997,11 @@ public class SabnzbdClient
             var historyItem = history?.FirstOrDefault(h => string.Equals(h.nzo_id, nzoId, StringComparison.OrdinalIgnoreCase));
 
             if (historyItem != null && !string.IsNullOrWhiteSpace(categoryToMatch) &&
-                !string.Equals(historyItem.category, categoryToMatch, StringComparison.OrdinalIgnoreCase))
+                !string.Equals(historyItem.CategoryName, categoryToMatch, StringComparison.OrdinalIgnoreCase))
             {
-                historyItem = null;
+                _logger.LogDebug(
+                    "[SABnzbd] Download {NzoId} has category '{Actual}' instead of '{Expected}'. Tracking its exact ID",
+                    nzoId, historyItem.CategoryName, categoryToMatch);
             }
 
             if (historyItem != null)
@@ -972,6 +1046,13 @@ public class SabnzbdClient
                 if (reportedStatus == "failed")
                 {
                     var failMessage = historyItem.fail_message?.ToLowerInvariant() ?? "";
+
+                    // SABnzbd always sends fail_message and sends it empty when it
+                    // has no detail. The property is never null, so treat an empty
+                    // message as absent. The fallback text below can then apply.
+                    var reportedFailure = string.IsNullOrWhiteSpace(historyItem.fail_message)
+                        ? null
+                        : historyItem.fail_message;
 
                     var isRepairFailure =
                         failMessage.Contains("repair") ||
@@ -1022,14 +1103,14 @@ public class SabnzbdClient
                         _logger.LogError("[SABnzbd] Download {NzoId} REPAIR FAILED: {FailMessage}. Files are incomplete/corrupted - NOT importing.",
                             nzoId, historyItem.fail_message);
                         status = "failed";
-                        errorMessage = historyItem.fail_message ?? "Repair failed - files are incomplete";
+                        errorMessage = reportedFailure ?? "Repair failed - files are incomplete";
                     }
                     else if (isUnpackOrMoveFailure)
                     {
                         _logger.LogError("[SABnzbd] Download {NzoId} UNPACK/MOVE FAILED: {FailMessage}. Destination folder is empty - NOT importing.",
                             nzoId, historyItem.fail_message);
                         status = "failed";
-                        errorMessage = historyItem.fail_message ?? "Unpack failed - no files to import";
+                        errorMessage = reportedFailure ?? "Unpack failed - no files to import";
                     }
                     else if (isPostProcessingScriptFailure)
                     {
@@ -1039,14 +1120,14 @@ public class SabnzbdClient
                         _logger.LogWarning("[SABnzbd] Download {NzoId} completed but post-processing script failed: {FailMessage}. Will attempt import anyway.",
                             nzoId, historyItem.fail_message);
                         status = "completed";
-                        errorMessage = $"Post-processing warning: {historyItem.fail_message}";
+                        errorMessage = $"Post-processing warning: {reportedFailure ?? "script failed"}";
                     }
                     else
                     {
                         // Other download failures (network, missing files on server, etc.)
                         _logger.LogError("[SABnzbd] Download {NzoId} failed: {FailMessage}", nzoId, historyItem.fail_message);
                         status = "failed";
-                        errorMessage = historyItem.fail_message ?? "Download failed";
+                        errorMessage = reportedFailure ?? "Download failed";
                     }
                 }
 
@@ -1114,70 +1195,54 @@ public class SabnzbdClient
     {
         try
         {
-            // SABnzbd splits storage between an active queue and a completed-history
-            // store. A download moves out of the queue into history when it finishes,
-            // and the two delete endpoints (?mode=queue&name=delete and ?mode=history
-            // &name=delete) operate independently. The previous implementation called
-            // queue-delete first and short-circuited the history call as soon as the
-            // HTTP request returned a non-null body — but SABnzbd's queue-delete
-            // returns {"status":true,"nzo_ids":[]} even when the nzo_id isn't in the
-            // queue, which the early code read as success. Result: a completed
-            // download sitting in history was never actually removed, the detector
-            // re-found it on the next 30-second poll, and the user got stuck in a
-            // re-add loop.
-            //
-            // The fix: parse the response body, check whether the requested nzo_id
-            // is in the returned nzo_ids list, and ALWAYS try both endpoints. Both
-            // are idempotent on their own (SABnzbd reports success with an empty
-            // list when the id isn't there), so calling both costs at most one
-            // extra HTTP roundtrip and guarantees the entry is gone regardless of
-            // which store it lives in.
-            // Both delete URLs need output=json so SABnzbd returns
-            // {"status":true,"nzo_ids":[...]}; without it SAB defaults
-            // to text/plain "ok\n" or HTML, JsonDocument.Parse throws
-            // in DeletionTouched, the catch silently returns false,
-            // and this method warns "neither queue nor history
-            // acknowledged" even when the deletion succeeded.
-            var deletedFromAnything = false;
-            var mode = deleteFiles ? "delete" : "remove";
+            var queue = await GetQueueByNzoIdsAsync(config, nzoId);
+            if (queue == null)
+                return false;
+
+            var wasQueued = queue.Any(item => string.Equals(item.nzo_id, nzoId, StringComparison.OrdinalIgnoreCase));
+            if (!deleteFiles && config.Type == DownloadClientType.DecypharrUsenet)
+            {
+                if (!wasQueued)
+                {
+                    var existingHistory = await GetHistoryByNzoIdAsync(config, nzoId);
+                    if (existingHistory == null)
+                        return false;
+                    if (!existingHistory.Any(item => string.Equals(item.nzo_id, nzoId, StringComparison.OrdinalIgnoreCase)))
+                        return true;
+                }
+
+                // This client deletes files even when the request omits del_files.
+                _logger.LogWarning("[SABnzbd] {Client} cannot remove download {NzoId} while keeping its files; leaving the download in the client",
+                    config.Name, nzoId);
+                return false;
+            }
+
+            var queueRemoved = false;
             var delFilesParam = deleteFiles ? "&del_files=1" : "";
-
-            var queueResponse = await SendApiRequestAsync(config, $"?mode=queue&name={mode}&value={nzoId}{delFilesParam}&output=json");
-            if (DeletionTouched(queueResponse, nzoId))
+            if (wasQueued)
             {
-                _logger.LogInformation("[SABnzbd] Removed {NzoId} from queue", nzoId);
-                deletedFromAnything = true;
-            }
-            else
-            {
-                _logger.LogDebug("[SABnzbd] Queue delete reported no change for {NzoId} (likely already in history). Raw response: {Response}",
-                    nzoId, TruncateForLog(queueResponse));
+                var queueResponse = await SendApiRequestAsync(config,
+                    $"?mode=queue&name=delete&value={nzoId}{delFilesParam}&output=json");
+                queueRemoved = DeletionTouched(queueResponse, nzoId);
             }
 
-            var historyDelFilesParam = deleteFiles ? "&del_files=1" : "";
-            var historyResponse = await SendApiRequestAsync(config, $"?mode=history&name=delete&value={nzoId}{historyDelFilesParam}&output=json");
-            if (DeletionTouched(historyResponse, nzoId))
-            {
-                _logger.LogInformation("[SABnzbd] Removed {NzoId} from history", nzoId);
-                deletedFromAnything = true;
-            }
-            else
-            {
-                _logger.LogDebug("[SABnzbd] History delete reported no change for {NzoId}. Raw response: {Response}",
+            // Queue removal or completion can move the job into history.
+            var history = await GetHistoryByNzoIdAsync(config, nzoId);
+            if (history == null)
+                return false;
+
+            var inHistory = history.Any(item => string.Equals(item.nzo_id, nzoId, StringComparison.OrdinalIgnoreCase));
+            if (!inHistory)
+                return queueRemoved || !wasQueued;
+
+            // A queue acknowledgement cannot confirm removal from history.
+            var historyResponse = await SendApiRequestAsync(config,
+                $"?mode=history&name=delete&value={nzoId}{delFilesParam}&output=json");
+            var removed = DeletionTouched(historyResponse, nzoId);
+            if (!removed)
+                _logger.LogWarning("[SABnzbd] History removal was not confirmed for {NzoId}: {Response}",
                     nzoId, TruncateForLog(historyResponse));
-            }
-
-            if (!deletedFromAnything)
-            {
-                // Log the raw bodies when the warning fires - this is
-                // the only diagnostic we'll have if SAB returns
-                // something unexpected. Capped at 500 chars per body.
-                _logger.LogWarning(
-                    "[SABnzbd] Neither queue nor history acknowledged deletion of {NzoId} - already gone, or SAB returned an unexpected shape. queue={Queue} history={History}",
-                    nzoId, TruncateForLog(queueResponse), TruncateForLog(historyResponse));
-            }
-
-            return deletedFromAnything;
+            return removed;
         }
         catch (Exception ex)
         {
@@ -1186,13 +1251,6 @@ public class SabnzbdClient
         }
     }
 
-    /// <summary>
-    /// SABnzbd's delete endpoints return {"status":true,"nzo_ids":[…]} where
-    /// the array contains the nzo_ids that were actually affected. An empty
-    /// array means SABnzbd accepted the request but didn't have anything
-    /// matching to remove. Returns true only when the requested id appears
-    /// in the returned list.
-    /// </summary>
     /// <summary>
     /// Truncate a response body for log output. Keeps the head of
     /// any unexpected response (HTML error page, plain "ok", whatever
@@ -1216,26 +1274,10 @@ public class SabnzbdClient
             var root = doc.RootElement;
             if (!root.TryGetProperty("status", out var statusProp) || !statusProp.GetBoolean()) return false;
 
-            // SABnzbd's history-delete reliably returns status:true on
-            // success but the shape of nzo_ids varies by version: some
-            // versions return ["nzo_id"], some return [], and some
-            // omit the field entirely. Previously we required the id
-            // to appear in the array, which rejected legitimate
-            // single-id history-delete successes from any SAB build
-            // that omits/empties the array (warning fired after every
-            // import despite SAB having actually performed the
-            // delete). Treat status:true as authoritative success;
-            // when nzo_ids IS present we still verify the id appears
-            // in it so a delete that affected something else doesn't
-            // get counted.
+            // Some compatible clients omit affected IDs. Callers first verify membership.
             if (!root.TryGetProperty("nzo_ids", out var idsProp) || idsProp.ValueKind != JsonValueKind.Array)
                 return true;
 
-            // Empty array on a status:true response means SAB accepted
-            // the request and either removed nothing or simply didn't
-            // echo the list. Trust status:true here too - the
-            // alternative is the spurious-warning regression noted
-            // above.
             var any = false;
             foreach (var idElement in idsProp.EnumerateArray())
             {
@@ -1409,6 +1451,8 @@ public class SabnzbdClient
             // authenticate from there and reject form-only auth; real SABnzbd
             // accepts either.
             var addUrlQuery = new System.Text.StringBuilder("?mode=addurl&output=json");
+            if (!string.IsNullOrWhiteSpace(category))
+                addUrlQuery.Append($"&category={Uri.EscapeDataString(category)}");
             if (hasApiKey)
             {
                 addUrlQuery.Append($"&apikey={Uri.EscapeDataString(config.ApiKey!)}");
@@ -1448,7 +1492,8 @@ public class SabnzbdClient
                 // SendApiRequestAsync appends the auth itself. Adding it here as
                 // well sent ma_username and ma_password twice, which is the same
                 // CherryPy list merge that breaks mode.
-                var getQuery = $"?mode=addurl&name={Uri.EscapeDataString(nzbUrl)}&cat={Uri.EscapeDataString(category)}&output=json";
+                var encodedCategory = Uri.EscapeDataString(category);
+                var getQuery = $"?mode=addurl&name={Uri.EscapeDataString(nzbUrl)}&cat={encodedCategory}&category={encodedCategory}&output=json";
                 if (!string.IsNullOrWhiteSpace(nzbname))
                 {
                     getQuery += $"&nzbname={Uri.EscapeDataString(nzbname)}";
@@ -1598,8 +1643,12 @@ public class SabnzbdHistoryItem
     public string name { get; set; } = "";
     public string status { get; set; } = "";
     public long bytes { get; set; }
+    public string cat { get; set; } = "";
     public string category { get; set; } = "";
     public string storage { get; set; } = "";
     public long completed { get; set; } // Unix timestamp
     public string fail_message { get; set; } = ""; // Why it failed (if status is Failed)
+
+    [JsonIgnore]
+    public string CategoryName => !string.IsNullOrEmpty(category) ? category : cat;
 }

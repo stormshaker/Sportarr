@@ -718,6 +718,9 @@ namespace Sportarr.Api.Migrations.Postgres.Migrations
                     b.Property<int>("EventId")
                         .HasColumnType("integer");
 
+                    b.Property<DateTime?>("FailedAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<string>("GrabCategory")
                         .HasColumnType("text");
 
@@ -741,6 +744,9 @@ namespace Sportarr.Api.Migrations.Postgres.Migrations
 
                     b.Property<bool>("IsPack")
                         .HasColumnType("boolean");
+
+                    b.Property<DateTime?>("LastProgressAt")
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("LastUpdate")
                         .HasColumnType("timestamp with time zone");
@@ -1251,6 +1257,9 @@ namespace Sportarr.Api.Migrations.Postgres.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<bool>("HasFile")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool?>("HasLaterSeasonFinal")
                         .HasColumnType("boolean");
 
                     b.Property<string>("HomeScore")
@@ -2366,6 +2375,10 @@ namespace Sportarr.Api.Migrations.Postgres.Migrations
                         .HasColumnType("character varying(100)")
                         .HasAnnotation("Relational:JsonPropertyName", "strSport");
 
+                    b.Property<string>("SportFormat")
+                        .HasColumnType("text")
+                        .HasAnnotation("Relational:JsonPropertyName", "strSportFormat");
+
                     b.Property<string>("Tags")
                         .IsRequired()
                         .HasColumnType("text");
@@ -2451,6 +2464,9 @@ namespace Sportarr.Api.Migrations.Postgres.Migrations
                         .HasColumnType("boolean");
 
                     b.Property<bool>("CreateEventFolders")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("CreateEventTypeFolders")
                         .HasColumnType("boolean");
 
                     b.Property<bool>("CreateLeagueFolders")
@@ -2807,6 +2823,9 @@ namespace Sportarr.Api.Migrations.Postgres.Migrations
 
                     b.Property<string>("InfoUrl")
                         .HasColumnType("text");
+
+                    b.Property<bool?>("IsPack")
+                        .HasColumnType("boolean");
 
                     b.Property<string>("Language")
                         .HasColumnType("text");
@@ -3373,7 +3392,7 @@ namespace Sportarr.Api.Migrations.Postgres.Migrations
                         {
                             Id = 1,
                             CutoffQuality = 15,
-                            FormatItems = "[{\"Id\":0,\"FormatId\":1,\"Format\":null,\"Score\":-10000},{\"Id\":0,\"FormatId\":2,\"Format\":null,\"Score\":-10000},{\"Id\":0,\"FormatId\":3,\"Format\":null,\"Score\":5},{\"Id\":0,\"FormatId\":4,\"Format\":null,\"Score\":-10000},{\"Id\":0,\"FormatId\":5,\"Format\":null,\"Score\":-10000},{\"Id\":0,\"FormatId\":6,\"Format\":null,\"Score\":0},{\"Id\":0,\"FormatId\":7,\"Format\":null,\"Score\":10}]",
+                            FormatItems = "[{\"Id\":0,\"FormatId\":1,\"Format\":null,\"Score\":0},{\"Id\":0,\"FormatId\":2,\"Format\":null,\"Score\":0},{\"Id\":0,\"FormatId\":3,\"Format\":null,\"Score\":0},{\"Id\":0,\"FormatId\":4,\"Format\":null,\"Score\":0},{\"Id\":0,\"FormatId\":5,\"Format\":null,\"Score\":0},{\"Id\":0,\"FormatId\":6,\"Format\":null,\"Score\":0},{\"Id\":0,\"FormatId\":7,\"Format\":null,\"Score\":0}]",
                             FormatScoreIncrement = 1,
                             IsCustomized = false,
                             IsDefault = true,
@@ -3387,7 +3406,7 @@ namespace Sportarr.Api.Migrations.Postgres.Migrations
                         {
                             Id = 2,
                             CutoffQuality = 19,
-                            FormatItems = "[{\"Id\":0,\"FormatId\":1,\"Format\":null,\"Score\":-10000},{\"Id\":0,\"FormatId\":2,\"Format\":null,\"Score\":-10000},{\"Id\":0,\"FormatId\":3,\"Format\":null,\"Score\":5},{\"Id\":0,\"FormatId\":4,\"Format\":null,\"Score\":-10000},{\"Id\":0,\"FormatId\":5,\"Format\":null,\"Score\":-10000},{\"Id\":0,\"FormatId\":6,\"Format\":null,\"Score\":0},{\"Id\":0,\"FormatId\":7,\"Format\":null,\"Score\":10}]",
+                            FormatItems = "[{\"Id\":0,\"FormatId\":1,\"Format\":null,\"Score\":0},{\"Id\":0,\"FormatId\":2,\"Format\":null,\"Score\":0},{\"Id\":0,\"FormatId\":3,\"Format\":null,\"Score\":0},{\"Id\":0,\"FormatId\":4,\"Format\":null,\"Score\":0},{\"Id\":0,\"FormatId\":5,\"Format\":null,\"Score\":0},{\"Id\":0,\"FormatId\":6,\"Format\":null,\"Score\":0},{\"Id\":0,\"FormatId\":7,\"Format\":null,\"Score\":0}]",
                             FormatScoreIncrement = 1,
                             IsCustomized = false,
                             IsDefault = false,

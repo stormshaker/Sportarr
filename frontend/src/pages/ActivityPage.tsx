@@ -18,16 +18,16 @@ import {
   EyeIcon
 } from '@heroicons/react/24/outline';
 import apiClient from '../api/client';
+import ConfirmationModal from '../components/ConfirmationModal';
 import ManualImportModal from '../components/ManualImportModal';
 import PageHeader from '../components/PageHeader';
 import PageShell from '../components/PageShell';
 import SegmentedTabs from '../components/SegmentedTabs';
 import WantedPage from './WantedPage';
-import { useCompactView } from '../hooks/useCompactView';
+import { useCompactView, useIsDesktopLayout } from '../hooks/useCompactView';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { BADGE_BLUE, BADGE_PURPLE, BUTTON_DESTRUCTIVE, BUTTON_ICON_DESTRUCTIVE, BUTTON_ICON_INFO, BUTTON_ICON_SECONDARY, BUTTON_ICON_SUCCESS, BUTTON_ICON_WARNING, BUTTON_INFO, BUTTON_SECONDARY, BUTTON_SUCCESS, BUTTON_WARNING } from '../utils/designTokens';
+import { BADGE_BLUE, BADGE_PURPLE, BUTTON_DESTRUCTIVE, BUTTON_ICON_DESTRUCTIVE, BUTTON_ICON_INFO, BUTTON_ICON_SECONDARY, BUTTON_ICON_SUCCESS, BUTTON_ICON_WARNING, BUTTON_INFO, BUTTON_SECONDARY, BUTTON_SUCCESS, BUTTON_WARNING, COMPACT_LIST_FRAME, COMPACT_LIST_ROW } from '../utils/designTokens';
 import { formatRelativeDate } from '../utils/timezone';
-import { errorMessage } from '../utils/errors';
 
 type TabType = 'queue' | 'history' | 'blocklist' | 'grabHistory' | 'missing' | 'cutoffUnmet';
 
@@ -60,6 +60,9 @@ interface QueueItem {
   size: number;
   downloaded: number;
   progress: number;
+  canRetryImport: boolean;
+  canImportAnyway?: boolean;
+  canChooseVideo?: boolean;
   timeRemaining?: string;
   errorMessage?: string;
   statusMessages?: string[]; // Status messages (warnings, errors)
@@ -70,6 +73,14 @@ interface QueueItem {
   qualityScore?: number;
   customFormatScore?: number;
 }
+
+const isQueueItemUnmonitored = (item: QueueItem): boolean =>
+  item.statusMessages?.some(message => message.includes('no longer monitored')) ?? false;
+
+const canImportQueueItem = (item: QueueItem): boolean => {
+  if (item.canRetryImport || item.canImportAnyway || item.canChooseVideo) return false;
+  return item.status === 3 || (isQueueItemUnmonitored(item) && item.status === 5);
+};
 
 interface ColumnVisibility {
   event: boolean;
@@ -84,6 +95,35 @@ interface ColumnVisibility {
   client: boolean;
   added: boolean;
   actions: boolean;
+}
+
+interface ExistingEventFile {
+  quality: string;
+  customFormatScore: number;
+  partName?: string | null;
+}
+
+interface ManualImportDialog {
+  items: QueueItem[];
+  existingFiles: Record<number, ExistingEventFile[]>;
+  loading: boolean;
+  loadError?: boolean;
+  error?: string;
+}
+
+interface VideoCandidate {
+  relativePath: string;
+  size: number;
+}
+
+interface VideoChoiceDialog {
+  item: QueueItem;
+  files: VideoCandidate[];
+  existingFiles: ExistingEventFile[];
+  selectedPath: string;
+  loading: boolean;
+  loadError?: boolean;
+  error?: string;
 }
 
 interface HistoryItem {
@@ -147,7 +187,7 @@ interface GrabHistoryItem {
 
 interface PendingImport {
   id: number;
-  downloadClientId: number;
+  downloadClientId: number | null;
   downloadId: string;
   downloadClient?: DownloadClient;
   title: string;
@@ -160,6 +200,7 @@ interface PendingImport {
   suggestedPart?: string;
   suggestionConfidence: number;
   detected: string;
+  errorMessage?: string;
   protocol?: string;
   isPack?: boolean;
   fileCount?: number;
@@ -189,7 +230,7 @@ interface RemoveQueueDialog {
   // Pending imports picked in the same selection. They run on their own
   // endpoints, but the dialog has to name them because confirming removes
   // them too.
-  pendingItems: { id: number; title: string }[];
+  pendingItems: { id: number; title: string; downloadClientId?: number | null }[];
 }
 
 interface RemoveHistoryDialog {
@@ -206,7 +247,10 @@ interface RemoveBlocklistDialog {
   title: string;
 }
 
-const statusNames = ['Queued', 'Downloading', 'Paused', 'Completed', 'Failed', 'Warning', 'Importing', 'Imported'];
+const statusNames = [
+  'Queued', 'Downloading', 'Paused', 'Completed', 'Failed',
+  'Warning', 'Importing', 'Imported', 'Import Pending', 'Import Warning'
+];
 const statusColors = [
   'text-gray-400',      // Queued
   'text-blue-400',      // Downloading
@@ -215,7 +259,9 @@ const statusColors = [
   'text-red-400',       // Failed
   'text-orange-400',    // Warning
   'text-purple-400',    // Importing
-  'text-green-500'      // Imported
+  'text-green-500',     // Imported
+  'text-yellow-400',    // Import Pending
+  'text-orange-400'     // Import Warning
 ];
 
 const decisionNames = ['Approved', 'Rejected', 'Already Imported', 'Upgraded'];
@@ -271,6 +317,16 @@ export default function ActivityPage() {
   const [isLoading, setIsLoading] = useState(true); // Only true for initial load
   const [isInitialLoad, setIsInitialLoad] = useState(true);
   const [removeQueueDialog, setRemoveQueueDialog] = useState<RemoveQueueDialog | null>(null);
+  const [manualImportDialog, setManualImportDialog] = useState<ManualImportDialog | null>(null);
+  const lastManualImportDialog = React.useRef<ManualImportDialog | null>(null);
+  if (manualImportDialog) lastManualImportDialog.current = manualImportDialog;
+  const shownManualImportDialog = manualImportDialog ?? lastManualImportDialog.current;
+  const [manualImportBusy, setManualImportBusy] = useState(false);
+  const [videoChoiceDialog, setVideoChoiceDialog] = useState<VideoChoiceDialog | null>(null);
+  const lastVideoChoiceDialog = React.useRef<VideoChoiceDialog | null>(null);
+  if (videoChoiceDialog) lastVideoChoiceDialog.current = videoChoiceDialog;
+  const shownVideoChoiceDialog = videoChoiceDialog ?? lastVideoChoiceDialog.current;
+  const [videoChoiceBusy, setVideoChoiceBusy] = useState(false);
   const [removeHistoryDialog, setRemoveHistoryDialog] = useState<RemoveHistoryDialog | null>(null);
   const [removeBlocklistDialog, setRemoveBlocklistDialog] = useState<RemoveBlocklistDialog | null>(null);
   const [selectedBlocklistIds, setSelectedBlocklistIds] = useState<Set<number>>(new Set());
@@ -278,6 +334,10 @@ export default function ActivityPage() {
   const [clearAllBlocklistOpen, setClearAllBlocklistOpen] = useState(false);
   const [removalMethod, setRemovalMethod] = useState<RemovalMethod>('removeFromClient');
   const [blocklistAction, setBlocklistAction] = useState<BlocklistAction>('none');
+  // A pending import the scan made from a file on disk has no download
+  // client to clear; removing the row takes the file with it unless the
+  // user unticks this, the way a client removal takes the download's files.
+  const [deleteDiskFile, setDeleteDiskFile] = useState(true);
   const [historyBlocklistAction, setHistoryBlocklistAction] = useState<BlocklistAction>('none');
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
@@ -373,6 +433,35 @@ export default function ActivityPage() {
   const [lastSelectedKey, setLastSelectedKey] = useState<string | null>(null);
 
   const compactView = useCompactView();
+  const wideScreen = useIsDesktopLayout();
+  const [expandedCompactRow, setExpandedCompactRow] = useState<string | null>(null);
+  const focusedQueueId = Number(new URLSearchParams(location.search).get('queue')) || null;
+  const lastFocusedQueueId = React.useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!focusedQueueId) return;
+    setActiveTab('queue');
+    setPage(1);
+  }, [focusedQueueId]);
+
+  useEffect(() => {
+    if (!focusedQueueId) {
+      lastFocusedQueueId.current = null;
+      return;
+    }
+    if (activeTab !== 'queue' || lastFocusedQueueId.current === focusedQueueId) return;
+    if (!queueItems.some(item => item.id === focusedQueueId)) return;
+    const view = wideScreen ? 'table' : 'list';
+    const timer = window.setTimeout(() => {
+      const row = document.querySelector<HTMLElement>(`[data-queue-id="${focusedQueueId}"][data-view="${view}"]`);
+      if (row) {
+        row.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
+        row.focus({ preventScroll: true });
+        lastFocusedQueueId.current = focusedQueueId;
+      }
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [focusedQueueId, activeTab, queueItems, wideScreen]);
 
   // Track user scrolling to pause auto-refresh
   useEffect(() => {
@@ -546,9 +635,9 @@ export default function ActivityPage() {
       setRegrabbing(id);
       await apiClient.post(`/grab-history/${id}/regrab`);
       loadGrabHistory();
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to re-grab:', error);
-      alert(errorMessage(error, 'Failed to re-grab release'));
+      alert(error.response?.data?.error || 'Failed to re-grab release');
     } finally {
       setRegrabbing(null);
     }
@@ -565,9 +654,9 @@ export default function ActivityPage() {
     try {
       await apiClient.delete(`/events/${item.eventId}/files/${item.eventFileId}`);
       loadGrabHistory();
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to delete file:', error);
-      alert(errorMessage(error, 'Failed to delete file'));
+      alert(error.response?.data?.error || 'Failed to delete file');
     }
   };
 
@@ -578,9 +667,9 @@ export default function ActivityPage() {
       const data = response.data;
       alert(`Re-grabbed ${data.regrabbed} releases. ${data.failed} failed.`);
       loadGrabHistory();
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to bulk re-grab:', error);
-      alert(errorMessage(error, 'Failed to re-grab missing releases'));
+      alert(error.response?.data?.error || 'Failed to re-grab missing releases');
     } finally {
       setBulkRegrabbing(false);
     }
@@ -616,9 +705,9 @@ export default function ActivityPage() {
       setLoadingPackPreview(true);
       const response = await apiClient.get(`/pending-imports/${pendingImport.id}/pack-matches`);
       setPackMatches(response.data.matches || []);
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to load pack matches:', error);
-      alert(errorMessage(error, 'Failed to load pack preview'));
+      alert(error.response?.data?.error || 'Failed to load pack preview');
       setPackPreviewImport(null);
     } finally {
       setLoadingPackPreview(false);
@@ -633,9 +722,9 @@ export default function ActivityPage() {
       alert(`Pack imported: ${data.filesImported} files imported, ${data.filesSkipped} skipped, ${data.filesDeleted} deleted`);
       setPackPreviewImport(null);
       loadQueue();
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to import pack:', error);
-      alert(errorMessage(error, 'Failed to import pack'));
+      alert(error.response?.data?.error || 'Failed to import pack');
     } finally {
       setImportingPack(null);
     }
@@ -654,6 +743,7 @@ export default function ActivityPage() {
     });
     setRemovalMethod('removeFromClient'); // Reset to default
     setBlocklistAction('none'); // Reset to default
+    setDeleteDiskFile(true);
   };
 
   // Open the remove dialog for the current selection. Pending imports have
@@ -669,31 +759,26 @@ export default function ActivityPage() {
         downloadClient: item.downloadClient
       }));
 
-    const selectedPendings = pendingImports.filter(p => selectedPendingIds.has(p.id));
+    const selectedPendings = visiblePendingImports.filter(p => selectedPendingIds.has(p.id));
 
     if (selectedItems.length === 0 && selectedPendings.length === 0) return;
 
     setRemoveQueueDialog({
       type: 'queue',
       items: selectedItems,
-      pendingItems: selectedPendings.map(p => ({ id: p.id, title: p.title }))
+      pendingItems: selectedPendings.map(p => ({ id: p.id, title: p.title, downloadClientId: p.downloadClientId }))
     });
     setRemovalMethod('removeFromClient'); // Reset to default
     setBlocklistAction('none'); // Reset to default
+    setDeleteDiskFile(true);
   };
 
-  // Bulk Import: walk the selection and call the appropriate per-item import
-  // endpoint (force-import for unmonitored rows, retry-import for failed-but-
-  // downloaded rows). Disabled when the selection contains pending imports
-  // or queue rows whose status doesn't expose an Import action.
   const handleBulkImport = async () => {
     if (!canBulkImport) return;
     const items = selectedQueueItems;
     try {
       await Promise.all(items.map(async item => {
-        const isUnmonitored = item.statusMessages?.some(msg => msg.includes('no longer monitored')) ?? false;
-        const canImport = isUnmonitored && (item.status === 5 || item.status === 3);
-        if (canImport) {
+        if (canImportQueueItem(item)) {
           await apiClient.post(`/queue/${item.id}/import`);
         } else {
           await apiClient.post(`/queue/${item.id}/retry`);
@@ -706,6 +791,86 @@ export default function ActivityPage() {
     }
   };
 
+  const openManualImportDialog = async (item: QueueItem) => {
+    const items = [item];
+    setManualImportDialog({ items, existingFiles: {}, loading: true });
+    try {
+      const eventIds = [...new Set(items.map(item => item.eventId))];
+      const results = await Promise.all(eventIds.map(async eventId => {
+        const response = await apiClient.get<ExistingEventFile[]>(`/events/${eventId}/files`);
+        return [eventId, response.data] as const;
+      }));
+      setManualImportDialog(current => current?.items === items
+        ? { ...current, existingFiles: Object.fromEntries(results), loading: false }
+        : current);
+    } catch {
+      setManualImportDialog(current => current?.items === items
+        ? { ...current, loading: false, loadError: true, error: 'Could not load the current files. Close this window and try again.' }
+        : current);
+    }
+  };
+
+  const confirmManualImport = async () => {
+    if (!manualImportDialog || manualImportDialog.loading || manualImportBusy || manualImportDialog.loadError) return;
+    setManualImportBusy(true);
+    const item = manualImportDialog.items[0];
+    try {
+      await apiClient.post(`/queue/${item.id}/import-anyway`);
+      loadQueue();
+      setManualImportDialog(null);
+    } catch (error: any) {
+      loadQueue();
+      setManualImportDialog(current => current
+        ? { ...current, error: error.response?.data?.error || 'Import failed. Try again.' }
+        : current);
+    } finally {
+      setManualImportBusy(false);
+    }
+  };
+
+  const openVideoChoiceDialog = async (item: QueueItem) => {
+    setVideoChoiceDialog({ item, files: [], existingFiles: [], selectedPath: '', loading: true });
+    const [filesResult, existingResult] = await Promise.allSettled([
+      apiClient.get<VideoCandidate[]>(`/queue/${item.id}/video-files`),
+      apiClient.get<ExistingEventFile[]>(`/events/${item.eventId}/files`)
+    ]);
+    setVideoChoiceDialog(current => current?.item.id === item.id
+      ? {
+          ...current,
+          files: filesResult.status === 'fulfilled' ? filesResult.value.data : [],
+          existingFiles: existingResult.status === 'fulfilled' ? existingResult.value.data : [],
+          loading: false,
+          loadError: filesResult.status === 'rejected' || existingResult.status === 'rejected',
+          error: filesResult.status === 'rejected'
+            ? 'Could not load the video files. Close this window and try again.'
+            : existingResult.status === 'rejected'
+              ? 'Could not load the current files. Close this window and try again.'
+              : undefined
+        } : current);
+  };
+
+  const confirmVideoChoice = async () => {
+    if (!videoChoiceDialog?.selectedPath || videoChoiceBusy) return;
+    setVideoChoiceBusy(true);
+    setVideoChoiceDialog(current => current ? { ...current, error: undefined } : current);
+    try {
+      await apiClient.post(`/queue/${videoChoiceDialog.item.id}/import-selected`,
+        { relativePath: videoChoiceDialog.selectedPath });
+      setVideoChoiceDialog(null);
+      loadQueue();
+    } catch (error: any) {
+      if (error.response?.data?.retryRequired) {
+        setVideoChoiceDialog(null);
+      } else {
+        setVideoChoiceDialog(current => current
+          ? { ...current, error: error.response?.data?.error || 'Import failed. Choose a file again.' } : current);
+      }
+      loadQueue();
+    } finally {
+      setVideoChoiceBusy(false);
+    }
+  };
+
   // Ignoring a download and changing its category are things a pending import
   // has no endpoint for. It is not a queue item in a download client, so there
   // is no category to change and nothing to go on ignoring. Mapping either onto
@@ -713,24 +878,47 @@ export default function ActivityPage() {
   // detector recreated the row on its next pass.
   const pendingImportsSupported = removalMethod === 'removeFromClient';
 
+  // A row the scan made from a file on disk has no client, so the removal
+  // method above does not apply to it; it is removed whatever the method says.
+  type PendingRemovalItem = { id: number; downloadClientId?: number | null };
+  const isDiskFound = (p: PendingRemovalItem) => !p.downloadClientId;
+  const diskFoundInDialog = (removeQueueDialog?.pendingItems ?? []).some(isDiskFound);
+  // Only files the library found: no download client is involved, so the
+  // dialog speaks of files, not downloads, and skips the removal method.
+  const onlyDiskRows = !!removeQueueDialog
+    && removeQueueDialog.items.length === 0
+    && removeQueueDialog.pendingItems.length > 0
+    && removeQueueDialog.pendingItems.every(isDiskFound);
+  const onlyClientPendings = !!removeQueueDialog
+    && removeQueueDialog.items.length === 0
+    && removeQueueDialog.pendingItems.length > 0
+    && removeQueueDialog.pendingItems.every(p => !isDiskFound(p));
+
   // A pending import has two removal endpoints. Pick the one that matches what
   // the dialog offered. Removing from the client always blocklists, because the
   // detectors would otherwise re-add the download on the next poll.
-  const pendingImportRemoval = (id: number) => {
+  const pendingImportRemoval = (p: PendingRemovalItem) => {
     const search = blocklistAction === 'blocklistAndSearch';
 
+    if (isDiskFound(p)) {
+      const file = `deleteFile=${deleteDiskFile}`;
+      return blocklistAction === 'none'
+        ? { method: 'delete' as const, url: `/pending-imports/${p.id}?${file}` }
+        : { method: 'post' as const, url: `/pending-imports/${p.id}/reject?search=${search}&${file}` };
+    }
+
     if (removalMethod === 'removeFromClient') {
-      return { method: 'post' as const, url: `/pending-imports/${id}/remove-from-client?search=${search}` };
+      return { method: 'post' as const, url: `/pending-imports/${p.id}/remove-from-client?search=${search}` };
     }
 
     if (blocklistAction === 'none') {
-      return { method: 'delete' as const, url: `/pending-imports/${id}` };
+      return { method: 'delete' as const, url: `/pending-imports/${p.id}` };
     }
 
     // Carry the search half of the choice through. Rejecting always
     // blocklists, so without this flag "blocklist and search" and "blocklist
     // only" did exactly the same thing for a pending import.
-    return { method: 'post' as const, url: `/pending-imports/${id}/reject?search=${search}` };
+    return { method: 'post' as const, url: `/pending-imports/${p.id}/reject?search=${search}` };
   };
 
   const handleRemoveQueue = async () => {
@@ -753,9 +941,10 @@ export default function ActivityPage() {
       // Pending imports the user picked in the same selection. They have their
       // own endpoints, so map the dialog choices onto the matching one instead
       // of always deleting their files.
-      if (pendingItems.length > 0 && pendingImportsSupported) {
-        await Promise.all(pendingItems.map(p =>
-          apiClient.request(pendingImportRemoval(p.id)).catch(err => {
+      const actionable = pendingItems.filter(p => isDiskFound(p) || pendingImportsSupported);
+      if (actionable.length > 0) {
+        await Promise.all(actionable.map(p =>
+          apiClient.request(pendingImportRemoval(p)).catch(err => {
             console.error('Failed to remove pending import:', err);
           })
         ));
@@ -768,7 +957,6 @@ export default function ActivityPage() {
     }
   };
 
-  // Force import for unmonitored event downloads (Sonarr-style)
   const handleForceImport = async (item: QueueItem) => {
     try {
       await apiClient.post(`/queue/${item.id}/import`);
@@ -783,9 +971,9 @@ export default function ActivityPage() {
     try {
       await apiClient.post(`/queue/${item.id}/retry`);
       loadQueue();
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to retry import:', error);
-      alert(errorMessage(error, 'Failed to retry import'));
+      alert(error.response?.data?.error || 'Failed to retry import');
     }
   };
 
@@ -871,11 +1059,25 @@ export default function ActivityPage() {
     );
   };
 
+  // The dialog explains whether removal also deletes client or disk files.
+  const handleRemovePendingImport = (pendingImport: PendingImport) => {
+    setRemoveQueueDialog({
+      type: 'queue',
+      items: [],
+      pendingItems: [{ id: pendingImport.id, title: pendingImport.title, downloadClientId: pendingImport.downloadClientId }]
+    });
+    setRemovalMethod('removeFromClient');
+    setBlocklistAction('none');
+    setDeleteDiskFile(true);
+  };
+
   const handleIgnorePendingImport = async (id: number) => {
     try {
       // Rejects the pending import: the row is removed and the file's path
       // is blocklisted, so scans and the file watcher stop rediscovering it.
-      await apiClient.post(`/pending-imports/${id}/reject`);
+      // Ignore keeps the file, as its tooltip says; removing the row is
+      // what takes a disk-found file with it.
+      await apiClient.post(`/pending-imports/${id}/reject?deleteFile=false`);
       loadQueue();
     } catch (error) {
       console.error('Failed to ignore pending import:', error);
@@ -1026,7 +1228,7 @@ export default function ActivityPage() {
   // controls see the same ordering as before.
   const queueRowsAll = (showUnknownEvents
     ? queueItems
-    : queueItems.filter(item => item.event && item.event.id)
+    : queueItems.filter(item => (item.event && item.event.id) || item.id === focusedQueueId)
   ).slice().sort((a, b) => {
     const dir = queueSortDirection === 'asc' ? 1 : -1;
     const cmpStr = (x: string | undefined, y: string | undefined) =>
@@ -1049,6 +1251,11 @@ export default function ActivityPage() {
       default:         return 0;
     }
   });
+
+  const focusedIndex = queueRowsAll.findIndex(item => item.id === focusedQueueId);
+  if (focusedIndex > 0) {
+    queueRowsAll.unshift(queueRowsAll.splice(focusedIndex, 1)[0]);
+  }
 
   // Pending imports follow the same sort the queue uses so clicking a
   // column header reorders both lists consistently. Field mapping mirrors
@@ -1080,7 +1287,7 @@ export default function ActivityPage() {
   // and typically few; whatever budget remains goes to queue rows. Without
   // this, "Page Size 200" with 95 pending imports rendered 295 rows total
   // and the bulk-select count silently exceeded the page size.
-  const visiblePendingImports = pendingImportsSorted.slice(0, pageSize);
+  const visiblePendingImports = pendingImportsSorted.slice(0, focusedIndex >= 0 ? Math.max(0, pageSize - 1) : pageSize);
   const queueRowBudget = Math.max(0, pageSize - visiblePendingImports.length);
   const queueRows = queueRowsAll.slice(0, queueRowBudget);
   const totalAvailable = pendingImports.length + queueRowsAll.length;
@@ -1096,8 +1303,24 @@ export default function ActivityPage() {
     ...queueRows.map(q => `q-${q.id}`),
   ];
 
-  const totalSelected = selectedQueueIds.size + selectedPendingIds.size;
+  const visibleSelectionKey = selectableRowKeys.join('|');
+  const visibleSelectedQueueIds = new Set(queueRows.filter(item => selectedQueueIds.has(item.id)).map(item => item.id));
+  const visibleSelectedPendingIds = new Set(visiblePendingImports.filter(item => selectedPendingIds.has(item.id)).map(item => item.id));
+  const totalSelected = visibleSelectedQueueIds.size + visibleSelectedPendingIds.size;
   const totalSelectable = selectableRowKeys.length;
+
+  useEffect(() => {
+    const visible = new Set(visibleSelectionKey ? visibleSelectionKey.split('|') : []);
+    setSelectedQueueIds(previous => {
+      const kept = [...previous].filter(id => visible.has(`q-${id}`));
+      return kept.length === previous.size ? previous : new Set(kept);
+    });
+    setSelectedPendingIds(previous => {
+      const kept = [...previous].filter(id => visible.has(`p-${id}`));
+      return kept.length === previous.size ? previous : new Set(kept);
+    });
+    setLastSelectedKey(previous => previous && !visible.has(previous) ? null : previous);
+  }, [visibleSelectionKey]);
 
   // Toggle a single row, with optional shift-click semantics: when shift is
   // held and there's a previous anchor row, every row between the anchor and
@@ -1169,29 +1392,24 @@ export default function ActivityPage() {
   const isAllQueueSelected = totalSelectable > 0 && totalSelected === totalSelectable;
   const isSomeQueueSelected = totalSelected > 0 && totalSelected < totalSelectable;
 
-  // Bulk Import is only valid for queue items where a per-item Import action
-  // is already exposed (force-import on unmonitored Warning/Completed rows
-  // and retry-import on failed-but-downloaded rows). Pending imports require
-  // per-item event mapping via the manual import dialog so they can't ride
-  // along on a bulk import.
+  // Pending imports need individual event mapping before import.
   const isQueueRowImportable = (item: QueueItem): boolean => {
-    const isUnmonitored = item.statusMessages?.some(msg => msg.includes('no longer monitored')) ?? false;
-    const canImport = isUnmonitored && (item.status === 5 || item.status === 3);
-    const canRetryImport = item.status === 4 && item.progress >= 100;
-    return canImport || canRetryImport;
+    const canRetryImport = item.canRetryImport === true;
+    return canImportQueueItem(item) || canRetryImport;
   };
 
-  const selectedQueueItems = queueRows.filter(item => selectedQueueIds.has(item.id));
+  const selectedQueueItems = queueRows.filter(item => visibleSelectedQueueIds.has(item.id));
   const canBulkImport =
     totalSelected > 0 &&
-    selectedPendingIds.size === 0 &&
-    selectedQueueItems.length === selectedQueueIds.size &&
-    selectedQueueItems.every(isQueueRowImportable);
+    visibleSelectedPendingIds.size === 0 &&
+    selectedQueueItems.every(item => !item.canImportAnyway && isQueueRowImportable(item));
 
   const bulkImportDisabledReason = (() => {
     if (totalSelected === 0) return 'Select rows to import';
-    if (selectedPendingIds.size > 0) return 'Pending imports require per-item event mapping; remove them from the selection or open them individually';
-    if (!selectedQueueItems.every(isQueueRowImportable)) return 'One or more selected items are still downloading or already imported';
+    if (visibleSelectedPendingIds.size > 0) return 'Pending imports require per-item event mapping; remove them from the selection or open them individually';
+    if (selectedQueueItems.some(item => item.canImportAnyway)) return 'Import Anyway needs confirmation for each download. Open each row individually';
+    if (selectedQueueItems.some(item => item.canChooseVideo)) return 'Choose a video for each download before importing';
+    if (!selectedQueueItems.every(isQueueRowImportable)) return 'One or more selected items cannot be imported yet. Check each row for the reason';
     return '';
   })();
 
@@ -1311,16 +1529,15 @@ export default function ActivityPage() {
             <div className="text-gray-400 text-xs truncate" title={formatDate(item.added)}>{formatDate(item.added)}</div>
           </td>
         );
-      case 'actions': {
-        const isUnmonitored = item.statusMessages?.some(msg => msg.includes('no longer monitored'));
-        // Show import button for Warning (5) or Completed (3) status when unmonitored
-        const canImport = isUnmonitored && (item.status === 5 || item.status === 3);
-        // Show retry import button for Failed (4) items that have completed download (100% progress)
-        const canRetryImport = item.status === 4 && item.progress >= 100;
+      case 'actions':
+        const isUnmonitored = isQueueItemUnmonitored(item);
+        const canImport = canImportQueueItem(item);
+        const canRetryImport = item.canRetryImport === true;
+        const canImportAnyway = item.canImportAnyway === true;
+        const canChooseVideo = item.canChooseVideo === true;
         return (
           <td key="actions" className="px-2 py-1.5">
             <div className="flex items-center justify-end gap-1">
-              {/* Show Retry Import button for failed imports (download complete but import failed) */}
               {canRetryImport && (
                 <button
                   onClick={() => handleRetryImport(item)}
@@ -1330,27 +1547,46 @@ export default function ActivityPage() {
                   <ArrowPathIcon className="w-4 h-4" />
                 </button>
               )}
-              {/* Show Import/Delete buttons for unmonitored downloads (Sonarr-style) */}
-              {canImport && (
-                <>
-                  <button
-                    onClick={() => handleForceImport(item)}
-                    className={BUTTON_ICON_SUCCESS}
-                    title="Import Anyway"
-                  >
-                    <DocumentCheckIcon className="w-4 h-4" />
-                  </button>
-                  <button
-                    onClick={() => handleDeleteUnmonitored(item)}
-                    className={BUTTON_ICON_DESTRUCTIVE}
-                    title="Delete Download"
-                  >
-                    <TrashIcon className="w-4 h-4" />
-                  </button>
-                </>
+              {canImportAnyway && (
+                <button
+                  onClick={() => openManualImportDialog(item)}
+                  className={BUTTON_ICON_WARNING}
+                  title="Import Anyway"
+                  aria-label="Import Anyway"
+                >
+                  <DocumentCheckIcon className="w-4 h-4" />
+                </button>
               )}
-              {/* Regular remove button (only show when not already showing delete button for unmonitored) */}
-              {!canImport && (
+              {canChooseVideo && (
+                <button
+                  onClick={() => openVideoChoiceDialog(item)}
+                  className={BUTTON_ICON_WARNING}
+                  title="Choose Video"
+                  aria-label="Choose Video"
+                >
+                  <DocumentCheckIcon className="w-4 h-4" />
+                </button>
+              )}
+              {canImport && (
+                <button
+                  onClick={() => handleForceImport(item)}
+                  className={BUTTON_ICON_SUCCESS}
+                  title="Import"
+                  aria-label="Import"
+                >
+                  <DocumentCheckIcon className="w-4 h-4" />
+                </button>
+              )}
+              {canImport && isUnmonitored && (
+                <button
+                  onClick={() => handleDeleteUnmonitored(item)}
+                  className={BUTTON_ICON_DESTRUCTIVE}
+                  title="Delete Download"
+                >
+                  <TrashIcon className="w-4 h-4" />
+                </button>
+              )}
+              {(!canImport || !isUnmonitored) && (
                 <button
                   onClick={() => handleOpenRemoveQueueDialog(item)}
                   className={BUTTON_ICON_DESTRUCTIVE}
@@ -1362,7 +1598,6 @@ export default function ActivityPage() {
             </div>
           </td>
         );
-      }
       default:
         return null;
     }
@@ -1378,6 +1613,8 @@ export default function ActivityPage() {
       case 5: return <ExclamationTriangleIcon className="w-4 h-4" />;
       case 6: return <DocumentCheckIcon className="w-4 h-4 animate-pulse" />;
       case 7: return <CheckCircleIcon className="w-4 h-4" />;
+      case 8: return <ClockIcon className="w-4 h-4" />;
+      case 9: return <ExclamationTriangleIcon className="w-4 h-4" />;
       default: return <ClockIcon className="w-4 h-4" />;
     }
   };
@@ -1513,6 +1750,9 @@ export default function ActivityPage() {
                       return (
                         <td key="title" className="px-3 py-1.5 overflow-hidden">
                           <div className="text-gray-300 text-xs truncate" title={pendingImport.title}>{pendingImport.title}</div>
+                          {pendingImport.errorMessage && (
+                            <div className="text-yellow-400 text-xs">{pendingImport.errorMessage}</div>
+                          )}
                         </td>
                       );
                     case 'quality':
@@ -1619,17 +1859,11 @@ export default function ActivityPage() {
                               <NoSymbolIcon className="w-4 h-4" />
                             </button>
                             <button
-                              onClick={async () => {
-                                try {
-                                  // Remove from download client AND pending imports list
-                                  await apiClient.post(`/pending-imports/${pendingImport.id}/remove-from-client`);
-                                  loadQueue();
-                                } catch (error) {
-                                  console.error('Failed to remove pending import from client:', error);
-                                }
-                              }}
+                              onClick={() => handleRemovePendingImport(pendingImport)}
                               className={BUTTON_ICON_DESTRUCTIVE}
-                              title="Remove download from client and delete files"
+                              title={isDiskFound(pendingImport)
+                                ? 'Remove this file from the list and from disk'
+                                : 'Remove download from client and delete files'}
                             >
                               <TrashIcon className="w-4 h-4" />
                             </button>
@@ -1647,7 +1881,11 @@ export default function ActivityPage() {
             {queueRows.map((item) => (
               <tr
                 key={item.id}
-                className={`hover:bg-gray-800/50 transition-colors ${rowPadding} ${selectedQueueIds.has(item.id) ? 'bg-red-900/20 ring-1 ring-red-600/40' : ''}`}
+                data-queue-id={item.id}
+                data-view="table"
+                tabIndex={focusedQueueId === item.id ? -1 : undefined}
+                aria-label={focusedQueueId === item.id ? `Queue item: ${item.event?.title || item.title}` : undefined}
+                className={`hover:bg-gray-800/50 transition-colors ${rowPadding} ${focusedQueueId === item.id ? 'bg-amber-900/20 ring-1 ring-inset ring-amber-500/60' : selectedQueueIds.has(item.id) ? 'bg-red-900/20 ring-1 ring-red-600/40' : ''}`}
               >
                 {/* Row Checkbox - shift-click extends selection from
                     the previous click anchor across both queue rows
@@ -1675,6 +1913,191 @@ export default function ActivityPage() {
     );
   };
 
+  const renderCompactQueueList = () => (
+    <div>
+      <div className="mb-2 flex items-center gap-2 rounded-lg bg-gray-800 px-2 py-1 text-xs text-gray-300">
+        <label className="flex h-11 w-11 flex-none items-center justify-center">
+          <input
+            type="checkbox"
+            checked={isAllQueueSelected}
+            ref={el => { if (el) el.indeterminate = isSomeQueueSelected; }}
+            onChange={toggleSelectAllQueue}
+            aria-label={isAllQueueSelected ? 'Deselect all queue items' : 'Select all queue items'}
+            className="h-4 w-4 cursor-pointer rounded border-gray-600 bg-gray-700 text-red-600 focus:ring-2 focus:ring-red-600"
+          />
+        </label>
+        <label htmlFor="compact-queue-sort" className="shrink-0 text-gray-400">Sort</label>
+        <select
+          id="compact-queue-sort"
+          value={queueSortField}
+          onChange={event => setQueueSortField(event.target.value as QueueSortField)}
+          className="min-h-11 min-w-0 flex-1 rounded-lg border border-gray-700 bg-gray-800 px-2 text-gray-200 focus:border-red-600 focus:outline-none focus:ring-1 focus:ring-red-500"
+        >
+          <option value="event">Event</option>
+          <option value="title">Episode Title</option>
+          <option value="quality">Quality</option>
+          <option value="status">Status</option>
+          <option value="progress">Progress</option>
+          <option value="size">Size</option>
+          <option value="client">Download Client</option>
+          <option value="added">Added</option>
+        </select>
+        <button
+          type="button"
+          onClick={() => setQueueSortDirection(direction => direction === 'asc' ? 'desc' : 'asc')}
+          className="flex h-11 w-11 flex-none items-center justify-center rounded-lg bg-gray-700 text-white hover:bg-gray-600"
+          aria-label={`Sort ${queueSortDirection === 'asc' ? 'descending' : 'ascending'}`}
+        >
+          {queueSortDirection === 'asc' ? <ChevronUpIcon className="h-4 w-4" /> : <ChevronDownIcon className="h-4 w-4" />}
+        </button>
+      </div>
+      <div className={COMPACT_LIST_FRAME}>
+        {visiblePendingImports.map(pendingImport => {
+          const key = `p:${pendingImport.id}`;
+          const expanded = expandedCompactRow === key;
+          const title = pendingImport.suggestedEvent?.title || pendingImport.title;
+          return (
+            <article key={key} data-pending-id={pendingImport.id} data-view="list" className={`${COMPACT_LIST_ROW} ${selectedPendingIds.has(pendingImport.id) ? 'bg-red-900/20' : ''}`}>
+              <label className="flex h-11 w-11 items-center justify-center">
+                <input
+                  type="checkbox"
+                  checked={selectedPendingIds.has(pendingImport.id)}
+                  onClick={event => toggleSelectRow('p', pendingImport.id, event.shiftKey)}
+                  onChange={() => {}}
+                  aria-label={`Select ${title}`}
+                  className="h-4 w-4 cursor-pointer rounded border-gray-600 bg-gray-700 text-red-600 focus:ring-2 focus:ring-red-600"
+                />
+              </label>
+              <button
+                type="button"
+                onClick={() => setExpandedCompactRow(expanded ? null : key)}
+                aria-expanded={expanded}
+                aria-controls={`compact-pending-${pendingImport.id}`}
+                aria-label={`${expanded ? 'Hide' : 'Show'} details for ${title}`}
+                className="flex min-h-11 min-w-0 items-center justify-between gap-2 text-left text-sm font-medium text-white"
+              >
+                <span className="min-w-0 truncate">{title}</span>
+                {expanded ? <ChevronUpIcon className="h-4 w-4 flex-none text-gray-400" /> : <ChevronDownIcon className="h-4 w-4 flex-none text-gray-400" />}
+              </button>
+              <div className="col-start-2 min-w-0 text-xs text-amber-400">
+                {pendingImport.isPack ? 'Pack import' : 'Manual import'}
+                {pendingImport.size > 0 && <span className="ml-2 text-gray-400">{formatBytes(pendingImport.size)}</span>}
+              </div>
+              {pendingImport.errorMessage && <p className="col-start-2 min-w-0 break-words text-xs text-amber-400">{pendingImport.errorMessage}</p>}
+              {expanded && (
+                <div id={`compact-pending-${pendingImport.id}`} className="col-start-2 mt-2 min-w-0 border-t border-gray-700 pt-2 text-xs text-gray-400">
+                  <p className="break-all">{pendingImport.title}</p>
+                  <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1">
+                    {pendingImport.quality && <span>{pendingImport.quality}</span>}
+                    {pendingImport.protocol && <span>{pendingImport.protocol}</span>}
+                    {pendingImport.downloadClient?.name && <span>{pendingImport.downloadClient.name}</span>}
+                    {pendingImport.detected && <span>{formatDate(pendingImport.detected)}</span>}
+                    {pendingImport.isPack && pendingImport.matchedEventsCount != null && <span>{pendingImport.matchedEventsCount} matched</span>}
+                    {!pendingImport.isPack && pendingImport.suggestedEvent && <span>{pendingImport.suggestionConfidence}% match</span>}
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {pendingImport.isPack ? (
+                      <>
+                        <button onClick={() => handleShowPackPreview(pendingImport)} className={`${BUTTON_SECONDARY} min-h-11`}><EyeIcon className="h-4 w-4" />Preview</button>
+                        <button onClick={() => handleImportPack(pendingImport)} disabled={importingPack === pendingImport.id} className={`${BUTTON_INFO} min-h-11`}><DocumentCheckIcon className="h-4 w-4" />Import Pack</button>
+                      </>
+                    ) : (
+                      <button onClick={() => setSelectedPendingImport(pendingImport)} className={`${BUTTON_WARNING} min-h-11`}><DocumentCheckIcon className="h-4 w-4" />Import</button>
+                    )}
+                    <button onClick={() => handleIgnorePendingImport(pendingImport.id)} className={`${BUTTON_SECONDARY} min-h-11`}><NoSymbolIcon className="h-4 w-4" />Ignore</button>
+                    <button onClick={() => handleRemovePendingImport(pendingImport)} className={`${BUTTON_DESTRUCTIVE} min-h-11`}><TrashIcon className="h-4 w-4" />Remove</button>
+                  </div>
+                </div>
+              )}
+            </article>
+          );
+        })}
+        {queueRows.map(item => {
+          const key = `q:${item.id}`;
+          const expanded = expandedCompactRow === key;
+          const title = item.event?.title || 'Unknown Event';
+          const isUnmonitored = isQueueItemUnmonitored(item);
+          const canImportCard = canImportQueueItem(item);
+          return (
+            <article
+              key={key}
+              data-queue-id={item.id}
+              data-view="list"
+              tabIndex={focusedQueueId === item.id ? -1 : undefined}
+              aria-label={focusedQueueId === item.id ? `Queue item: ${title}` : undefined}
+              className={`${COMPACT_LIST_ROW} ${focusedQueueId === item.id ? 'bg-amber-900/20 ring-1 ring-inset ring-amber-500/60' : selectedQueueIds.has(item.id) ? 'bg-red-900/20' : ''}`}
+            >
+              <label className="flex h-11 w-11 items-center justify-center">
+                <input
+                  type="checkbox"
+                  checked={selectedQueueIds.has(item.id)}
+                  onClick={event => toggleSelectRow('q', item.id, event.shiftKey)}
+                  onChange={() => {}}
+                  aria-label={`Select ${title}`}
+                  className="h-4 w-4 cursor-pointer rounded border-gray-600 bg-gray-700 text-red-600 focus:ring-2 focus:ring-red-600"
+                />
+              </label>
+              <button
+                type="button"
+                onClick={() => setExpandedCompactRow(expanded ? null : key)}
+                aria-expanded={expanded}
+                aria-controls={`compact-queue-${item.id}`}
+                aria-label={`${expanded ? 'Hide' : 'Show'} details for ${title}`}
+                className="flex min-h-11 min-w-0 items-center justify-between gap-2 text-left text-sm font-medium text-white"
+              >
+                <span className="min-w-0 truncate">{title}{item.part && <span className="ml-1 text-blue-400">({item.part})</span>}</span>
+                {expanded ? <ChevronUpIcon className="h-4 w-4 flex-none text-gray-400" /> : <ChevronDownIcon className="h-4 w-4 flex-none text-gray-400" />}
+              </button>
+              <div className={`col-start-2 flex min-w-0 flex-wrap items-center gap-x-2 text-xs ${statusColors[item.status]}`}>
+                {getStatusIcon(item.status)}<span>{statusNames[item.status]}</span>
+                {item.event?.organization && <span className="text-gray-400">{item.event.organization}</span>}
+              </div>
+              {item.status === 1 && (
+                <div className="col-start-2 mt-1 flex min-w-0 items-center gap-2">
+                  <div role="progressbar" aria-label="Download progress" aria-valuenow={item.progress} aria-valuemin={0} aria-valuemax={100} className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-gray-700">
+                    <div className="h-full rounded-full bg-red-600" style={{ width: `${item.progress}%` }} />
+                  </div>
+                  <span className="w-9 flex-none text-right text-xs text-gray-300">{item.progress.toFixed(0)}%</span>
+                </div>
+              )}
+              <div className="col-start-2 flex min-w-0 flex-wrap gap-x-2 gap-y-0.5 text-xs text-gray-400">
+                {item.size > 0 && <span>{formatBytes(item.downloaded)} / {formatBytes(item.size)}</span>}
+                {isMeaningfulTimeRemaining(item.timeRemaining) && <span>{item.timeRemaining} left</span>}
+              </div>
+              {item.statusMessages?.[0] && (
+                <p className="col-start-2 min-w-0 break-words text-xs text-amber-400">{item.statusMessages[0]}</p>
+              )}
+              {item.errorMessage && item.errorMessage !== item.statusMessages?.[0] && (
+                <p className="col-start-2 min-w-0 break-words text-xs text-red-400">{item.errorMessage}</p>
+              )}
+              {expanded && (
+                <div id={`compact-queue-${item.id}`} className="col-start-2 mt-2 min-w-0 border-t border-gray-700 pt-2 text-xs text-gray-400">
+                  <p className="break-all">{item.title}</p>
+                  <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1">
+                    {item.quality && <span>{item.quality}</span>}
+                    {item.customFormatScore != null && <span>CF {item.customFormatScore >= 0 ? '+' : ''}{item.customFormatScore}</span>}
+                    {item.protocol && <span>{item.protocol}</span>}
+                    {item.indexer && <span>{item.indexer}</span>}
+                    {item.downloadClient?.name && <span>{item.downloadClient.name}</span>}
+                    <span>{formatDate(item.added)}</span>
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {item.canRetryImport && <button onClick={() => handleRetryImport(item)} className={`${BUTTON_WARNING} min-h-11`}><ArrowPathIcon className="h-4 w-4" />Retry Import</button>}
+                    {item.canImportAnyway && <button onClick={() => openManualImportDialog(item)} className={`${BUTTON_WARNING} min-h-11`}><DocumentCheckIcon className="h-4 w-4" />Import Anyway</button>}
+                    {item.canChooseVideo && <button onClick={() => openVideoChoiceDialog(item)} className={`${BUTTON_WARNING} min-h-11`}><DocumentCheckIcon className="h-4 w-4" />Choose Video</button>}
+                    {canImportCard && <button onClick={() => handleForceImport(item)} className={`${BUTTON_SUCCESS} min-h-11`}><DocumentCheckIcon className="h-4 w-4" />Import</button>}
+                    {canImportCard && isUnmonitored && <button onClick={() => handleDeleteUnmonitored(item)} className={`${BUTTON_DESTRUCTIVE} min-h-11`}><TrashIcon className="h-4 w-4" />Delete</button>}
+                    {(!canImportCard || !isUnmonitored) && <button onClick={() => handleOpenRemoveQueueDialog(item)} className={`${BUTTON_DESTRUCTIVE} min-h-11`}><TrashIcon className="h-4 w-4" />Remove</button>}
+                  </div>
+                </div>
+              )}
+            </article>
+          );
+        })}
+      </div>
+    </div>
+  );
+
   // For multi-select, check if ANY item is completed and has post-import category option
   const removeDialogTotal = (removeQueueDialog?.items.length ?? 0) + (removeQueueDialog?.pendingItems.length ?? 0);
   const anyCompleted = removeQueueDialog?.items.some(item => item.status === 3 || item.status === 7);
@@ -1682,6 +2105,9 @@ export default function ActivityPage() {
     item => item.downloadClient?.postImportCategory != null && item.downloadClient?.postImportCategory !== ''
   );
   const showChangeCategory = anyCompleted && anyHasPostImportCategory;
+  const singleRemovalTitle = removeDialogTotal === 1
+    ? removeQueueDialog?.items[0]?.title || removeQueueDialog?.pendingItems[0]?.title
+    : null;
 
   return (
     <PageShell>
@@ -1721,6 +2147,11 @@ export default function ActivityPage() {
             ]}
             value={activeTab}
             onChange={(tab) => {
+              if (focusedQueueId) {
+                const params = new URLSearchParams(location.search);
+                params.delete('queue');
+                navigate({ pathname: location.pathname, search: params.toString() }, { replace: true });
+              }
               setActiveTab(tab);
               setPage(1);
             }}
@@ -1745,288 +2176,43 @@ export default function ActivityPage() {
               <>
               {/* Bulk Action Bar - Shows when items are selected */}
               {totalSelected > 0 && (
-                <div className="px-4 py-3 bg-gray-800 border-b border-gray-700 flex items-center justify-between">
-                  <span className="text-gray-300 text-sm">
-                    {totalSelected} item{totalSelected !== 1 ? 's' : ''} selected
-                  </span>
-                  <div className="flex items-center gap-2">
+                <div className="flex flex-col gap-2 border-b border-gray-700 bg-gray-800 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm text-gray-300">
+                      {totalSelected} item{totalSelected !== 1 ? 's' : ''} selected
+                    </span>
                     <button
                       onClick={clearRowSelections}
-                      className="px-3 py-1.5 text-gray-400 hover:text-white text-sm transition-colors"
+                      className="min-h-11 px-2 text-sm text-gray-400 transition-colors hover:text-white"
                     >
                       Clear Selection
                     </button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 sm:flex">
                     <button
                       onClick={handleBulkImport}
                       disabled={!canBulkImport}
                       title={canBulkImport ? 'Import selected items' : bulkImportDisabledReason}
-                      className={`px-4 py-1.5 text-white text-sm rounded transition-colors flex items-center gap-2 ${
+                      className={`flex min-h-11 min-w-0 items-center justify-center gap-1 rounded-lg px-2 text-xs text-white transition-colors sm:px-4 sm:text-sm ${
                         canBulkImport
                           ? 'bg-green-600 hover:bg-green-700'
                           : 'bg-gray-700 text-gray-400 cursor-not-allowed'
                       }`}
                     >
-                      <DocumentCheckIcon className="w-4 h-4" />
+                      <DocumentCheckIcon className="h-4 w-4 flex-none" />
                       Import Selected
                     </button>
                     <button
                       onClick={handleOpenBulkRemoveDialog}
-                      className="px-4 py-1.5 bg-red-600 hover:bg-red-700 text-white text-sm rounded transition-colors flex items-center gap-2"
+                      className="flex min-h-11 min-w-0 items-center justify-center gap-1 rounded-lg bg-red-600 px-2 text-xs text-white transition-colors hover:bg-red-700 sm:px-4 sm:text-sm"
                     >
-                      <TrashIcon className="w-4 h-4" />
+                      <TrashIcon className="h-4 w-4 flex-none" />
                       Remove Selected
                     </button>
                   </div>
                 </div>
               )}
-              {compactView ? (
-                renderQueueTable(true)
-              ) : (
-                /* Spacious: taller rows above sm, cards on a phone */
-                <div>
-                  {/* Phones get a Sort select instead of column headers. Nine
-                      column labels at ~40 px each overlap on a phone viewport,
-                      and the cards below already show every field. */}
-                  <div className="sm:hidden flex items-center gap-2 bg-gray-800 text-gray-300 text-xs px-3 py-2">
-                    <input
-                      type="checkbox"
-                      checked={isAllQueueSelected}
-                      ref={(el) => {
-                        if (el) el.indeterminate = isSomeQueueSelected;
-                      }}
-                      onChange={toggleSelectAllQueue}
-                      className="w-4 h-4 bg-gray-700 border-gray-600 rounded text-red-600 focus:ring-red-600 focus:ring-2 cursor-pointer flex-shrink-0"
-                      title={isAllQueueSelected ? 'Deselect all' : 'Select all'}
-                    />
-                    <span className="text-gray-400 flex-shrink-0">Sort:</span>
-                    <select
-                      value={queueSortField}
-                      onChange={(e) => setQueueSortField(e.target.value as QueueSortField)}
-                      className="flex-1 min-w-0 px-2 py-1 bg-gray-800 border border-gray-700 text-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-red-500"
-                    >
-                      <option value="event">Event</option>
-                      <option value="title">Episode Title</option>
-                      <option value="quality">Quality</option>
-                      <option value="status">Status</option>
-                      <option value="progress">Progress</option>
-                      <option value="size">Size</option>
-                      <option value="client">Download Client</option>
-                      <option value="added">Added</option>
-                    </select>
-                    <button
-                      onClick={() => setQueueSortDirection(d => d === 'asc' ? 'desc' : 'asc')}
-                      className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded flex-shrink-0"
-                      title={`Sort direction: ${queueSortDirection === 'asc' ? 'ascending' : 'descending'}`}
-                    >
-                      {queueSortDirection === 'asc'
-                        ? <ChevronUpIcon className="w-4 h-4" />
-                        : <ChevronDownIcon className="w-4 h-4" />}
-                    </button>
-                  </div>
-                  {/* Above sm the queue is the same table compact mode uses, so
-                      every value sits under its own column header. The card list
-                      below is the phone layout, where nine columns cannot fit. */}
-                  <div className="hidden sm:block">
-                    {renderQueueTable(false)}
-                  </div>
-                  <div className="space-y-3 mt-3 sm:hidden">
-                  {/* Pending Import Cards */}
-                  {visiblePendingImports.map((pendingImport) => (
-                    <div
-                      key={`pending-${pendingImport.id}`}
-                      className={`bg-gray-800 border rounded-lg p-4 hover:bg-gray-750 transition-colors ${selectedPendingIds.has(pendingImport.id) ? 'border-red-600' : pendingImport.isPack ? 'border-purple-700' : 'border-yellow-700'}`}
-                    >
-                      <div className="flex flex-wrap items-start justify-between gap-y-3">
-                        <input
-                          type="checkbox"
-                          checked={selectedPendingIds.has(pendingImport.id)}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            toggleSelectRow('p', pendingImport.id, e.shiftKey);
-                          }}
-                          onChange={() => { /* handled by onClick to read shiftKey */ }}
-                          className="mt-1.5 mr-3 w-4 h-4 bg-gray-700 border-gray-600 rounded text-red-600 focus:ring-red-600 focus:ring-2 cursor-pointer flex-shrink-0"
-                        />
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-3 mb-2 flex-wrap">
-                            <h3 className="text-lg font-semibold text-white">
-                              {pendingImport.suggestedEvent?.title || (
-                                pendingImport.isPack
-                                  ? <span className="text-gray-400 font-normal">{pendingImport.fileCount} files · {pendingImport.matchedEventsCount} matched</span>
-                                  : <span className="text-gray-500 italic font-normal">No match found</span>
-                              )}
-                            </h3>
-                            <span className={`px-2 py-1 text-xs rounded ${pendingImport.isPack ? 'bg-purple-600/30 text-purple-300' : 'bg-yellow-700/30 text-yellow-300'}`}>
-                              {pendingImport.isPack ? 'Pack' : 'Manual Import'}
-                            </span>
-                            {!pendingImport.isPack && pendingImport.suggestedEvent && (
-                              <span className="px-2 py-1 bg-gray-700 text-gray-400 text-xs rounded">{pendingImport.suggestionConfidence}% match</span>
-                            )}
-                            {pendingImport.isPack && pendingImport.suggestedEvent && (
-                              <span className="text-gray-500 text-xs">{pendingImport.fileCount} files · {pendingImport.matchedEventsCount} matched</span>
-                            )}
-                            {pendingImport.quality && <span className="px-2 py-1 bg-purple-900/30 text-purple-400 text-xs rounded">{pendingImport.quality}</span>}
-                            {pendingImport.protocol && <span className="px-2 py-1 bg-blue-900/30 text-blue-400 text-xs rounded uppercase">{pendingImport.protocol}</span>}
-                          </div>
-                          <p className="text-sm text-gray-400 truncate mb-1">{pendingImport.title}</p>
-                          <div className="flex items-center gap-4 text-sm text-gray-500 flex-wrap">
-                            {pendingImport.size > 0 && <span>{formatBytes(pendingImport.size)}</span>}
-                            {pendingImport.downloadClient?.name && <><span className="text-gray-600">•</span><span>{pendingImport.downloadClient.name}</span></>}
-                            {pendingImport.detected && <><span className="text-gray-600">•</span><span>{formatDate(pendingImport.detected)}</span></>}
-                          </div>
-                        </div>
-                        <div className="flex flex-wrap items-center gap-2 w-full justify-end sm:w-auto sm:ml-4">
-                          {pendingImport.isPack ? (
-                            <>
-                              <button
-                                onClick={() => handleShowPackPreview(pendingImport)}
-                                className={BUTTON_SECONDARY}
-                              >
-                                <EyeIcon className="w-4 h-4" />
-                                Preview
-                              </button>
-                              <button
-                                onClick={() => handleImportPack(pendingImport)}
-                                disabled={importingPack === pendingImport.id}
-                                className={BUTTON_INFO}
-                              >
-                                {importingPack === pendingImport.id
-                                  ? <ArrowPathIcon className="w-4 h-4 animate-spin" />
-                                  : <DocumentCheckIcon className="w-4 h-4" />}
-                                Import Pack
-                              </button>
-                            </>
-                          ) : (
-                            <button
-                              onClick={() => setSelectedPendingImport(pendingImport)}
-                              className={BUTTON_WARNING}
-                            >
-                              <DocumentCheckIcon className="w-4 h-4" />
-                              Import
-                            </button>
-                          )}
-                          <button
-                            onClick={() => handleIgnorePendingImport(pendingImport.id)}
-                            className={BUTTON_SECONDARY}
-                            title="Ignore this file: it stays on disk but Sportarr stops detecting or suggesting it (undo from the Blocklist tab)"
-                          >
-                            <NoSymbolIcon className="w-4 h-4" />
-                            Ignore
-                          </button>
-                          <button
-                            onClick={async () => {
-                              try {
-                                await apiClient.post(`/pending-imports/${pendingImport.id}/remove-from-client`);
-                                loadQueue();
-                              } catch (error) {
-                                console.error('Failed to remove pending import from client:', error);
-                              }
-                            }}
-                            className={BUTTON_DESTRUCTIVE}
-                          >
-                            <TrashIcon className="w-4 h-4" />
-                            Remove
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-
-                  {/* Queue Item Cards */}
-                  {queueRows.map((item) => {
-                    const isUnmonitored = item.statusMessages?.some(msg => msg.includes('no longer monitored'));
-                    const canImportCard = isUnmonitored && (item.status === 5 || item.status === 3);
-                    const canRetryImportCard = item.status === 4 && item.progress >= 100;
-                    return (
-                      <div
-                        key={item.id}
-                        className={`bg-gray-800 border rounded-lg p-4 hover:bg-gray-750 transition-colors ${selectedQueueIds.has(item.id) ? 'border-red-600' : 'border-gray-700'}`}
-                      >
-                        <div className="flex flex-wrap items-start justify-between gap-y-3">
-                          <div className="flex items-start gap-3 flex-1 min-w-0">
-                            <input
-                              type="checkbox"
-                              checked={selectedQueueIds.has(item.id)}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                toggleSelectRow('q', item.id, e.shiftKey);
-                              }}
-                              onChange={() => { /* handled by onClick to read shiftKey */ }}
-                              className="mt-1.5 w-4 h-4 bg-gray-700 border-gray-600 rounded text-red-600 focus:ring-red-600 focus:ring-2 cursor-pointer flex-shrink-0"
-                            />
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center gap-3 mb-2 flex-wrap">
-                                <h3 className="text-lg font-semibold text-white">
-                                  {item.event?.title || 'Unknown Event'}
-                                  {item.part && <span className="text-blue-400 text-sm ml-1">({item.part})</span>}
-                                </h3>
-                                {item.event?.organization && <span className="px-2 py-1 bg-red-900/30 text-red-400 text-xs rounded">{item.event.organization}</span>}
-                                <span className={`flex items-center gap-1 ${statusColors[item.status]}`}>
-                                  {getStatusIcon(item.status)}
-                                  <span className="text-xs">{statusNames[item.status]}</span>
-                                </span>
-                                {item.quality && <span className="px-2 py-1 bg-purple-900/30 text-purple-400 text-xs rounded">{item.quality}</span>}
-                                {cfScoreBadge(item.customFormatScore)}
-                                {item.protocol && <span className="px-2 py-1 bg-blue-900/30 text-blue-400 text-xs rounded uppercase">{item.protocol}</span>}
-                              </div>
-                              <p className="text-sm text-gray-400 truncate mb-2">{item.title}</p>
-                              {item.status === 1 && (
-                                <div className="flex items-center gap-2 mb-2">
-                                  <div className="flex-1 bg-gray-700 rounded-full h-1.5">
-                                    <div className="bg-red-600 h-1.5 rounded-full transition-all" style={{ width: `${item.progress}%` }} />
-                                  </div>
-                                  <span className="text-xs text-gray-400 flex-shrink-0">{item.progress.toFixed(0)}%</span>
-                                </div>
-                              )}
-                              {item.statusMessages && item.statusMessages.length > 0 && (
-                                <p className="text-sm text-orange-400 mb-2">{item.statusMessages[0]}</p>
-                              )}
-                              {item.errorMessage && !item.statusMessages?.length && (
-                                <p className="text-sm text-red-400 mb-2">{item.errorMessage}</p>
-                              )}
-                              <div className="flex items-center gap-4 text-sm text-gray-500 flex-wrap">
-                                <span>{formatBytes(item.downloaded)} / {formatBytes(item.size)}</span>
-                                {isMeaningfulTimeRemaining(item.timeRemaining) && <><span className="text-gray-600">•</span><span>{item.timeRemaining} left</span></>}
-                                {item.indexer && <><span className="text-gray-600">•</span><span>{item.indexer}</span></>}
-                                <span className="text-gray-600">•</span>
-                                <span>{formatDate(item.added)}</span>
-                                {item.downloadClient?.name && <><span className="text-gray-600">•</span><span>{item.downloadClient.name}</span></>}
-                              </div>
-                            </div>
-                          </div>
-                          <div className="flex flex-wrap items-center gap-2 w-full justify-end sm:w-auto sm:ml-4">
-                            {canRetryImportCard && (
-                              <button onClick={() => handleRetryImport(item)} className={BUTTON_WARNING}>
-                                <ArrowPathIcon className="w-4 h-4" />
-                                Retry Import
-                              </button>
-                            )}
-                            {canImportCard && (
-                              <>
-                                <button onClick={() => handleForceImport(item)} className={BUTTON_SUCCESS}>
-                                  <DocumentCheckIcon className="w-4 h-4" />
-                                  Import
-                                </button>
-                                <button onClick={() => handleDeleteUnmonitored(item)} className={BUTTON_DESTRUCTIVE}>
-                                  <TrashIcon className="w-4 h-4" />
-                                  Delete
-                                </button>
-                              </>
-                            )}
-                            {!canImportCard && (
-                              <button onClick={() => handleOpenRemoveQueueDialog(item)} className={BUTTON_DESTRUCTIVE}>
-                                <TrashIcon className="w-4 h-4" />
-                                Remove
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                  </div>
-                </div>
-              )}
+              {!wideScreen ? renderCompactQueueList() : renderQueueTable(compactView)}
               {totalHidden > 0 && (
                 <div className="px-4 py-2 text-xs text-gray-400 text-center bg-gray-900/40 border-t border-gray-800">
                   Showing {totalVisible} of {totalAvailable} items. Increase the Page Size in View Options to show more.
@@ -2612,15 +2798,96 @@ export default function ActivityPage() {
           </div>
         )}
 
+        <ConfirmationModal
+          isOpen={manualImportDialog !== null}
+          onClose={() => { if (!manualImportBusy) setManualImportDialog(null); }}
+          onConfirm={confirmManualImport}
+          title="Import this download?"
+          message={shownManualImportDialog && (
+            <div className="space-y-3">
+              <p>This choice bypasses quality and custom format preferences. It may replace the matching library file.</p>
+              {shownManualImportDialog.loading && <p>Loading current files...</p>}
+              {shownManualImportDialog.error && <p className="text-red-400">{shownManualImportDialog.error}</p>}
+              {!shownManualImportDialog.loading && !shownManualImportDialog.loadError && shownManualImportDialog.items.map(item => {
+                const files = shownManualImportDialog.existingFiles[item.eventId] ?? [];
+                const current = files.length > 0
+                  ? files.map(file => `${file.partName ? `${file.partName}: ` : ''}${file.quality} CF ${file.customFormatScore >= 0 ? '+' : ''}${file.customFormatScore}`).join(', ')
+                  : 'None';
+                const next = `${item.quality || 'Unknown'} CF ${(item.customFormatScore ?? 0) >= 0 ? '+' : ''}${item.customFormatScore ?? 0}`;
+                return (
+                  <div key={item.id} className="rounded-lg border border-gray-700 bg-black/30 p-3">
+                    <p className="font-medium text-white break-words">{item.event?.title || item.title}{item.part ? ` (${item.part})` : ''}</p>
+                    <p>Files on event: {current}</p>
+                    <p>Selected: {next}</p>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          confirmText="Import Anyway"
+          isLoading={manualImportBusy}
+          confirmDisabled={!!manualImportDialog?.loading || !!manualImportDialog?.loadError}
+          mobileFullScreen
+        />
+
+        <ConfirmationModal
+          isOpen={videoChoiceDialog !== null}
+          onClose={() => { if (!videoChoiceBusy) setVideoChoiceDialog(null); }}
+          onConfirm={confirmVideoChoice}
+          title="Choose the video to import"
+          message={shownVideoChoiceDialog && (
+            <div className="space-y-3">
+              <p>Sportarr found more than one possible video. The existing library file stays in place until you choose one. This manual choice ignores automatic upgrade preferences and can replace a higher-ranked file.</p>
+              {shownVideoChoiceDialog.loading && <p>Loading video files...</p>}
+              {shownVideoChoiceDialog.error && <p className="text-red-400">{shownVideoChoiceDialog.error}</p>}
+              {!shownVideoChoiceDialog.loading && !shownVideoChoiceDialog.error && (
+                <div className="rounded-lg border border-gray-700 bg-black/30 p-3">
+                  <p>Files on event: {shownVideoChoiceDialog.existingFiles.length > 0
+                    ? shownVideoChoiceDialog.existingFiles.map(file => `${file.quality} CF ${file.customFormatScore >= 0 ? '+' : ''}${file.customFormatScore}`).join(', ')
+                    : 'None'}</p>
+                  <p>Incoming: {shownVideoChoiceDialog.item.quality || 'Unknown'} CF {(shownVideoChoiceDialog.item.customFormatScore ?? 0) >= 0 ? '+' : ''}{shownVideoChoiceDialog.item.customFormatScore ?? 0}</p>
+                </div>
+              )}
+              {!shownVideoChoiceDialog.loading && !shownVideoChoiceDialog.loadError && shownVideoChoiceDialog.files.length === 0 &&
+                <p>No video files are available in this download.</p>}
+              <div className="max-h-64 space-y-2 overflow-y-auto">
+                {shownVideoChoiceDialog.files.map(file => (
+                  <label key={file.relativePath} className="flex min-h-11 items-center gap-3 rounded-lg border border-gray-700 bg-black/30 p-3 text-gray-200">
+                    <input
+                      type="radio"
+                      name="selected-video"
+                      value={file.relativePath}
+                      checked={shownVideoChoiceDialog.selectedPath === file.relativePath}
+                      onChange={() => setVideoChoiceDialog(current => current
+                        ? { ...current, selectedPath: file.relativePath, error: undefined } : current)}
+                      className="accent-red-600"
+                    />
+                    <span className="min-w-0 flex-1 break-words">{file.relativePath}</span>
+                    <span className="shrink-0 text-gray-400">{formatBytes(file.size)}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+          confirmText="Import Selected Video"
+          isLoading={videoChoiceBusy}
+          confirmDisabled={!videoChoiceDialog?.selectedPath || videoChoiceDialog.loading || !!videoChoiceDialog.loadError}
+          mobileFullScreen
+        />
+
         {/* Remove from Queue Dialog (Sonarr-style) - Supports single and bulk removal */}
         {removeQueueDialog && (
           <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4">
             <div className="bg-gradient-to-br from-gray-900 to-black border border-red-700 rounded-lg max-w-2xl w-full p-6">
               <div className="flex items-start justify-between mb-6">
                 <h3 className="text-xl font-bold text-white">
-                  {removeDialogTotal === 1 && removeQueueDialog.items.length === 1
-                    ? `Remove - ${removeQueueDialog.items[0].title.length > 60 ? removeQueueDialog.items[0].title.substring(0, 60) + '...' : removeQueueDialog.items[0].title}`
-                    : `Remove ${removeDialogTotal} Selected Downloads`
+                  {onlyClientPendings
+                    ? removeDialogTotal === 1 ? 'Remove pending download' : `Remove ${removeDialogTotal} pending downloads`
+                    : onlyDiskRows
+                      ? removeDialogTotal === 1 ? 'Remove file' : `Remove ${removeDialogTotal} files`
+                    : singleRemovalTitle
+                    ? `Remove - ${singleRemovalTitle.length > 60 ? singleRemovalTitle.substring(0, 60) + '...' : singleRemovalTitle}`
+                    : `Remove ${removeDialogTotal} Selected ${onlyDiskRows ? (removeDialogTotal === 1 ? 'File' : 'Files') : 'Downloads'}`
                   }
                 </h3>
                 <button
@@ -2631,14 +2898,20 @@ export default function ActivityPage() {
                 </button>
               </div>
 
-              {removeDialogTotal === 1 && removeQueueDialog.items.length === 1 ? (
+              {removeDialogTotal === 1 ? (
                 <p className="text-gray-300 mb-6">
-                  Are you sure you want to remove '{removeQueueDialog.items[0].title}' from the queue?
+                  {removeQueueDialog.items.length === 1
+                    ? `Are you sure you want to remove '${singleRemovalTitle}' from the queue?`
+                    : onlyDiskRows
+                      ? `Are you sure you want to remove '${singleRemovalTitle}' from the list?`
+                      : `Are you sure you want to remove '${singleRemovalTitle}' from the download client?`}
                 </p>
               ) : (
                 <div className="mb-6">
                   <p className="text-gray-300 mb-3">
-                    Are you sure you want to remove the following {removeDialogTotal} downloads from the queue?
+                    {onlyDiskRows
+                      ? `Are you sure you want to remove the following ${removeDialogTotal === 1 ? 'file' : `${removeDialogTotal} files`} from the list?`
+                      : `Are you sure you want to remove the following ${removeDialogTotal} downloads from the queue?`}
                   </p>
                   <div className="max-h-40 overflow-y-auto bg-gray-800/50 rounded-lg p-3 space-y-1">
                     {removeQueueDialog.items.map(item => (
@@ -2656,30 +2929,56 @@ export default function ActivityPage() {
               )}
 
               {/* Removal Method */}
+              {!onlyDiskRows && (
               <div className="mb-6">
                 <label className="block text-gray-300 font-medium mb-2">Removal Method</label>
-                <select
-                  value={removalMethod}
-                  onChange={(e) => setRemovalMethod(e.target.value as RemovalMethod)}
-                  className="w-full px-4 py-2 bg-gray-800 border border-gray-600 text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-red-600"
-                >
-                  <option value="removeFromClient">Remove from Download Client</option>
-                  {showChangeCategory && <option value="changeCategory">Change Category</option>}
-                  <option value="ignoreDownload">Ignore Download</option>
-                </select>
+                {onlyClientPendings ? (
+                  <div className="w-full rounded-lg border border-gray-600 bg-gray-800 px-4 py-2 text-white">
+                    Remove from Download Client
+                  </div>
+                ) : (
+                  <select
+                    value={removalMethod}
+                    onChange={(e) => setRemovalMethod(e.target.value as RemovalMethod)}
+                    className="w-full px-4 py-2 bg-gray-800 border border-gray-600 text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-red-600"
+                  >
+                    <option value="removeFromClient">Remove from Download Client</option>
+                    {showChangeCategory && <option value="changeCategory">Change Category</option>}
+                    <option value="ignoreDownload">Ignore Download</option>
+                  </select>
+                )}
                 <p className="text-sm text-yellow-500 mt-2">
                   {removalMethod === 'removeFromClient' && 'Deletes the download and its files from the download client'}
                   {removalMethod === 'changeCategory' && 'Changes download to the \'Post-Import Category\' from Download Client'}
                   {removalMethod === 'ignoreDownload' && 'Stops Sportarr from processing this download further'}
                 </p>
-                {removeQueueDialog.pendingItems.length > 0 && (
+                {removeQueueDialog.pendingItems.some(p => !isDiskFound(p)) && !onlyClientPendings && (
                   <p className="text-sm text-gray-400 mt-2">
                     {pendingImportsSupported
                       ? 'Pending imports are always blocklisted when removed this way, or the scanner finds them again on its next pass.'
-                      : `This method does not apply to pending imports, so the ${removeQueueDialog.pendingItems.length} listed above will be left alone. Choose Remove from Download Client to act on them.`}
+                      : `This method does not apply to pending imports from a download client, so those listed above will be left alone. Choose Remove from Download Client to act on them.`}
                   </p>
                 )}
               </div>
+              )}
+              {diskFoundInDialog && (
+                <div className="mb-6">
+                  <label className="flex items-start gap-3 text-sm text-gray-300">
+                    <input
+                      type="checkbox"
+                      checked={deleteDiskFile}
+                      onChange={(e) => setDeleteDiskFile(e.target.checked)}
+                      className="mt-0.5 w-4 h-4 rounded border-gray-600 bg-gray-700 text-red-600"
+                    />
+                    <span>
+                      Delete the file from disk
+                      <span className="block text-gray-500">
+                        The file goes to the recycle bin when one is set, otherwise it is deleted. Only a file inside a root folder is touched. A kept file is found again on the next scan unless you blocklist it.
+                      </span>
+                    </span>
+                  </label>
+                </div>
+              )}
 
               {/* Blocklist Release */}
               <div className="mb-6">
@@ -2689,12 +2988,14 @@ export default function ActivityPage() {
                   onChange={(e) => setBlocklistAction(e.target.value as BlocklistAction)}
                   className="w-full px-4 py-2 bg-gray-800 border border-gray-600 text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-red-600"
                 >
-                  <option value="none">Do not Blocklist</option>
+                  <option value="none">{onlyClientPendings ? 'Blocklist without searching' : 'Do not Blocklist'}</option>
                   <option value="blocklistAndSearch">Blocklist and Search for Replacement{removeDialogTotal > 1 ? 's' : ''}</option>
-                  <option value="blocklistOnly">Blocklist Only</option>
+                  {!onlyClientPendings && <option value="blocklistOnly">Blocklist Only</option>}
                 </select>
                 <p className="text-sm text-gray-400 mt-2">
-                  {blocklistAction === 'none' && `The release${removeDialogTotal > 1 ? 's' : ''} will remain eligible for future RSS and Automatic searches`}
+                  {blocklistAction === 'none' && (onlyClientPendings
+                    ? 'Pending downloads are blocklisted so the scanner does not add them again.'
+                    : `The release${removeDialogTotal > 1 ? 's' : ''} will remain eligible for future RSS and Automatic searches`)}
                   {blocklistAction === 'blocklistAndSearch' && `Blocklist release${removeDialogTotal > 1 ? 's' : ''} and search for replacement${removeDialogTotal > 1 ? 's' : ''}`}
                   {blocklistAction === 'blocklistOnly' && `Blocklist release${removeDialogTotal > 1 ? 's' : ''} without searching for replacement${removeDialogTotal > 1 ? 's' : ''}`}
                 </p>
@@ -2711,7 +3012,7 @@ export default function ActivityPage() {
                   onClick={handleRemoveQueue}
                   className="px-6 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors"
                 >
-                  Remove{removeDialogTotal > 1 ? ` ${removeDialogTotal} Downloads` : ''}
+                  Remove{removeDialogTotal > 1 ? ` ${removeDialogTotal} ${onlyDiskRows ? 'Files' : 'Downloads'}` : ''}
                 </button>
               </div>
             </div>

@@ -15,7 +15,6 @@ import {
 } from '@heroicons/react/24/outline';
 import { apiGet, apiPost, apiPut } from '../utils/api';
 import FileMetadataEditor, { type FileMetadataEditorValues } from './FileMetadataEditor';
-import { errorMessage } from '../utils/errors';
 
 interface League {
   id: number;
@@ -169,7 +168,7 @@ export default function ManualImportModal({ pendingImport, onClose, onSuccess, i
   const [selectedPart, setSelectedPart] = useState<string | null>(
     pendingImport.suggestedPart || null
   );
-  const [, setSelectedPartNumber] = useState<number | null>(null);
+  const [selectedPartNumber, setSelectedPartNumber] = useState<number | null>(null);
 
   // Pre-import metadata editor state. Pre-filled from the parser-derived values
   // on the pending import; user can override any field before clicking Import.
@@ -182,7 +181,7 @@ export default function ManualImportModal({ pendingImport, onClose, onSuccess, i
     originalTitle: pendingImport.title,
     languages: [],
     indexerFlags: undefined,
-    partName: pendingImport.suggestedPart,
+    partName: undefined,
     partNumber: undefined,
   });
   const [showEditor, setShowEditor] = useState(false);
@@ -407,6 +406,7 @@ export default function ManualImportModal({ pendingImport, onClose, onSuccess, i
     const part = parts.find(p => p.name === partName);
     setSelectedPart(partName || null);
     setSelectedPartNumber(part?.partNumber ?? null);
+    setEditorValues(current => ({ ...current, partName: undefined, partNumber: undefined }));
   };
 
   // Pull the server's message out of a failed response, falling back to a
@@ -458,9 +458,9 @@ export default function ManualImportModal({ pendingImport, onClose, onSuccess, i
       }
 
       onSuccess();
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to import:', error);
-      alert(`Import failed: ${errorMessage(error)}`);
+      alert(`Import failed: ${error.response?.data?.error || error.message}`);
     } finally {
       setIsLoading(false);
     }
@@ -469,16 +469,17 @@ export default function ManualImportModal({ pendingImport, onClose, onSuccess, i
   const handleReject = async () => {
     setIsLoading(true);
     try {
-      const response = await apiPost(`/api/pending-imports/${pendingImport.id}/reject`, {});
+      // Dismiss keeps the file, as its tooltip says; only Remove in Activity deletes it.
+      const response = await apiPost(`/api/pending-imports/${pendingImport.id}/reject?deleteFile=false`, {});
 
       if (!response.ok) {
         throw new Error(await readError(response, "Could not reject this file"));
       }
 
       onSuccess();
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to reject:', error);
-      alert(errorMessage(error, 'Could not reject this file'));
+      alert(error?.message ?? 'Could not reject this file');
     } finally {
       setIsLoading(false);
     }

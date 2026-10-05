@@ -1,10 +1,23 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import type { ReactNode } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { createRequestUrl } from '../utils/request';
 import { primeApiKey, clearPrimedApiKey } from '../api/client';
-import { AuthContext } from './auth-context';
-import type { AuthState } from './auth-context';
+
+interface AuthState {
+  isAuthenticated: boolean;
+  isAuthRequired: boolean;
+  isAuthDisabled: boolean;
+  isLoading: boolean;
+}
+
+interface AuthContextType extends AuthState {
+  login: (username: string, password: string, rememberMe: boolean) => Promise<boolean>;
+  logout: () => Promise<void>;
+  checkAuth: () => Promise<void>;
+}
+
+const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 // Initial state: loading=true prevents any routing decisions until auth is checked
 const initialAuthState: AuthState = {
@@ -190,3 +203,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 }
 
+export function useAuth() {
+  const context = useContext(AuthContext);
+  if (context === undefined) {
+    throw new Error('useAuth must be used within an AuthProvider');
+  }
+  return context;
+}

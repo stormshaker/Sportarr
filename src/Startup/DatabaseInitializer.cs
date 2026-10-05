@@ -118,6 +118,9 @@ public static class DatabaseInitializer
         }
         } // end: if (!db.Database.IsNpgsql()) - legacy EnsureCreated() detection/seeding
 
+        if (!db.Database.IsNpgsql())
+            ReconcileExistingColumnMigrations(db);
+
         // Now apply any new migrations. Breadcrumbs before and after so a
         // report of "stuck at Applying database migrations" pinpoints the
         // phase - this whole initializer speaks through the console, not
@@ -1323,6 +1326,8 @@ public static class DatabaseInitializer
             Console.WriteLine($"[Sportarr] Warning: Could not verify PendingReleases table: {ex.Message}");
         }
 
+        EnsureColumn(db, "PendingReleases", "IsPack", "INTEGER NULL");
+
         // Ensure SeasonPosters table exists (per-season poster artwork).
         // Populated by LeagueEventSyncService from TheSportsDB's season art
         // archive and read by the metadata agent endpoints.
@@ -1987,67 +1992,6 @@ public static class DatabaseInitializer
             Console.WriteLine($"[Sportarr] Warning: Could not clean up incomplete tasks: {ex.Message}");
         }
 
-        // Recover downloads stranded in the "Importing" state.
-        // The import sets Status = Importing and commits it before moving the
-        // file; the terminal Imported (or Failed) status is only written once the
-        // import finishes. If the process is killed in between — a crash, or the
-        // user restarting the container/host mid-import — the row is left at
-        // Importing forever. Nothing in the monitor's poll loop transitions a row
-        // OUT of Importing, so the "Importing to library..." badge sticks for days
-        // and the activity count never drops. On boot, reconcile each stranded
-        // row: if the event already has a file on disk the import effectively
-        // finished, so mark it Imported; otherwise hand it back to the monitor as
-        // Completed so the (idempotent) import is retried.
-        try
-        {
-            var stuckImports = await db.DownloadQueue
-                .Where(d => d.Status == DownloadStatus.Importing)
-                .ToListAsync();
-
-            if (stuckImports.Count > 0)
-            {
-                Console.WriteLine($"[Sportarr] Found {stuckImports.Count} download(s) stranded in 'Importing' from a previous session - recovering...");
-                foreach (var item in stuckImports)
-                {
-                    // The evidence has to be the file this download was importing,
-                    // not any file the event happens to own. Two cases made the
-                    // looser check finalise an import that never happened. An
-                    // upgrade deletes the old file from disk before it transfers
-                    // the new one and only drops the old row afterwards, so a
-                    // crash in between leaves a row describing a file that is
-                    // gone. And on a multi-part event one finished part answered
-                    // for every other part. Both stranded the download for good,
-                    // because nothing moves a row out of Imported.
-                    var partFiles = await db.EventFiles
-                        .Where(f => f.EventId == item.EventId && f.Exists)
-                        .ToListAsync();
-
-                    var importedFile = partFiles.FirstOrDefault(f =>
-                        string.Equals(f.PartName, item.Part, StringComparison.OrdinalIgnoreCase) &&
-                        !string.IsNullOrEmpty(f.FilePath) &&
-                        File.Exists(f.FilePath));
-
-                    if (importedFile != null)
-                    {
-                        item.Status = DownloadStatus.Imported;
-                        item.ImportedAt ??= DateTime.UtcNow;
-                    }
-                    else
-                    {
-                        // Hand it back to the monitor. The import is idempotent,
-                        // so a retry either completes it or fails visibly.
-                        item.Status = DownloadStatus.Completed;
-                    }
-                }
-                await db.SaveChangesAsync();
-                Console.WriteLine($"[Sportarr] Recovered {stuckImports.Count} stranded import(s)");
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[Sportarr] Warning: Could not recover stranded imports: {ex.Message}");
-        }
-
         // Drop the retired Event Mapping tables. The feature (Sportarr-API powered
         // release-name matching) was removed; these tables are no longer referenced
         // by any model, service, or endpoint. SQLite DROP TABLE IF EXISTS is a no-op
@@ -2062,6 +2006,42 @@ public static class DatabaseInitializer
             Console.WriteLine($"[Sportarr] Warning: Could not drop retired Event Mapping tables: {ex.Message}");
         }
         } // end: if (!db.Database.IsNpgsql()) - SQLite schema drift repairs/backfills
+
+        // Recover imports on both database providers. A file from an older
+        // download does not prove that this import finished.
+        try
+        {
+            var stuckImports = await db.DownloadQueue
+                .Where(item => item.Status == DownloadStatus.Importing)
+                .ToListAsync();
+            foreach (var item in stuckImports)
+            {
+                var files = await db.EventFiles
+                    .Where(file => file.EventId == item.EventId && file.Exists)
+                    .ToListAsync();
+                var histories = await db.ImportHistories
+                    .Where(history => history.DownloadQueueItemId == item.Id)
+                    .ToListAsync();
+                if (InterruptedImportRecovery.HasCompletedImport(item, files, histories))
+                {
+                    item.Status = DownloadStatus.Imported;
+                    item.ImportedAt ??= DateTime.UtcNow;
+                }
+                else
+                {
+                    item.Status = DownloadStatus.Completed;
+                }
+            }
+            if (stuckImports.Count > 0)
+            {
+                await db.SaveChangesAsync();
+                Console.WriteLine($"[Sportarr] Recovered {stuckImports.Count} interrupted import(s)");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Sportarr] Warning: Could not recover interrupted imports: {ex.Message}");
+        }
 
         // Bring league sports onto the hub's canonical names first, so the
         // event alignment below inherits them. The hub treats Combat as the
@@ -2136,6 +2116,12 @@ public static class DatabaseInitializer
     using (var scope = services.CreateScope())
     {
         var db = scope.ServiceProvider.GetRequiredService<SportarrDbContext>();
+        var normalizedProfileCount = await QualityProfileOrderNormalizer.NormalizeAsync(db);
+        if (normalizedProfileCount > 0)
+        {
+            Console.WriteLine($"[Sportarr] Corrected quality order for {normalizedProfileCount} imported profile(s)");
+        }
+
         try
         {
             var mediaSettings = await db.MediaManagementSettings.FirstOrDefaultAsync();
@@ -2285,6 +2271,8 @@ public static class DatabaseInitializer
         if (appSettings == null)
         {
             appSettings = new AppSettings { Id = 1 };
+            appSettings.TrashSyncSettings = System.Text.Json.JsonSerializer.Serialize(
+                new TrashSyncSettings { UseRecommendedReleaseSettings = false });
             db.AppSettings.Add(appSettings);
         }
 
@@ -2388,12 +2376,9 @@ public static class DatabaseInitializer
     /// teams were never imported under the new identity), and many
     /// seasons disappear from the UI entirely.
     ///
-    /// Detection: a Leagues row whose ExternalId is purely numeric AND
-    /// has zero attached teams AND another Leagues row exists with the
-    /// same Name + Sport whose ExternalId starts with "lg-" AND has at
-    /// least one team. Move every Events.LeagueId from orphan → canonical,
-    /// drop the orphan's LeagueTeams entries (none expected, but safe),
-    /// then delete the orphan league row itself.
+    /// Only numeric leagues without teams or team links are candidates.
+    /// A same-name league with a hub ID must also exist.
+    /// Move event links before deleting the orphan.
     ///
     /// Idempotent: re-running on a clean DB finds zero candidates and
     /// exits without modifying anything.
@@ -2435,6 +2420,7 @@ public static class DatabaseInitializer
                       AND l_orphan.ExternalId NOT LIKE 'lg-%'
                       AND l_orphan.ExternalId GLOB '[0-9]*'
                       AND NOT EXISTS (SELECT 1 FROM Teams WHERE LeagueId = l_orphan.Id)
+                      AND NOT EXISTS (SELECT 1 FROM LeagueTeams WHERE LeagueId = l_orphan.Id)
                       AND EXISTS (SELECT 1 FROM Teams WHERE LeagueId = l_canonical.Id)";
 
                 using var reader = cmd.ExecuteReader();
@@ -2471,13 +2457,6 @@ public static class DatabaseInitializer
                 // next sync upserts by ExternalId and resolves it then.
                 db.Database.ExecuteSqlInterpolated(
                     $"UPDATE Events SET LeagueId = {canonicalId} WHERE LeagueId = {orphanId}");
-
-                // Defensive cleanup -- orphans by definition have no team
-                // rows, so LeagueTeams entries shouldn't exist either, but
-                // FK constraints on LeagueTeams.LeagueId block the league
-                // DELETE if any are present from a partial pre-flip state.
-                db.Database.ExecuteSqlInterpolated(
-                    $"DELETE FROM LeagueTeams WHERE LeagueId = {orphanId}");
 
                 // Drop the orphan league row. Teams are zero by definition;
                 // events were rewired one statement up.
@@ -2685,11 +2664,13 @@ public static class DatabaseInitializer
     {
         EnsureColumn(db, "Events", "BroadcastDate", "TEXT NULL");
         EnsureColumn(db, "Events", "BroadcastDateVerified", "INTEGER NOT NULL DEFAULT 0");
+        EnsureColumn(db, "Events", "HasLaterSeasonFinal", "INTEGER NULL");
         EnsureColumn(db, "EventFiles", "IndexerFlags", "TEXT");
         EnsureColumn(db, "EventFiles", "Languages", "TEXT NOT NULL DEFAULT '[]'");
         EnsureColumn(db, "EventFiles", "ReleaseGroup", "TEXT");
         EnsureColumn(db, "MediaManagementSettings", "UserRejectedExtensions", "TEXT");
         EnsureColumn(db, "MediaManagementSettings", "FileFormatTokenUpgradeApplied", "INTEGER NOT NULL DEFAULT 0");
+        EnsureEventTypeFolderColumn(db);
         EnsureColumn(db, "Events", "Description", "TEXT");
         EnsureColumn(db, "IptvChannels", "HasArchive", "INTEGER NOT NULL DEFAULT 0");
         EnsureColumn(db, "IptvChannels", "ArchiveDays", "INTEGER NOT NULL DEFAULT 0");
@@ -2698,6 +2679,7 @@ public static class DatabaseInitializer
         EnsureColumn(db, "IptvSources", "FfmpegInputArgs", "TEXT");
         EnsureColumn(db, "EpgSources", "Priority", "INTEGER NOT NULL DEFAULT 25");
         EnsureColumn(db, "EpgSources", "IptvSourceId", "INTEGER");
+        EnsureColumn(db, "Leagues", "SportFormat", "TEXT NULL");
         EnsureColumn(db, "Leagues", "RetentionDays", "INTEGER NOT NULL DEFAULT 0");
         EnsureColumn(db, "Leagues", "AllowHighlights", "INTEGER NOT NULL DEFAULT 0");
         EnsureColumn(db, "Leagues", "EnableDvr", "INTEGER NOT NULL DEFAULT 1");
@@ -2719,6 +2701,8 @@ public static class DatabaseInitializer
         EnsureColumn(db, "Notifications", "LastNotificationAt", "TEXT NULL");
         EnsureColumn(db, "Events", "TsdbId", "TEXT NULL");
         EnsureColumn(db, "DownloadQueue", "OutputPath", "TEXT NULL");
+        EnsureColumn(db, "DownloadQueue", "FailedAt", "TEXT NULL");
+        EnsureColumn(db, "DownloadQueue", "LastProgressAt", "TEXT NULL");
 
         RelaxLegacyRootFolderColumns(db);
     }
@@ -2738,6 +2722,40 @@ public static class DatabaseInitializer
         {
             Console.WriteLine($"[Sportarr] Warning: Could not ensure {table}.{column} column: {ex.Message}");
         }
+    }
+
+    internal static void EnsureEventTypeFolderColumn(SportarrDbContext db)
+    {
+        EnsureColumn(db, "MediaManagementSettings", "CreateEventTypeFolders", "INTEGER NOT NULL DEFAULT 0");
+    }
+
+    internal static void ReconcileExistingColumnMigrations(SportarrDbContext db)
+    {
+        if (!HasColumn(db, "__EFMigrationsHistory", "MigrationId"))
+            return;
+
+        ReconcileExistingColumnMigration(db, "20260908224021_PreservePendingPackIntent", "PendingReleases", "IsPack");
+        ReconcileExistingColumnMigration(db, "20260926044143_AddDownloadFailureTime", "DownloadQueue", "FailedAt");
+        ReconcileExistingColumnMigration(db, "20260927070006_AddEventTypeFolders", "MediaManagementSettings", "CreateEventTypeFolders");
+    }
+
+    private static void ReconcileExistingColumnMigration(
+        SportarrDbContext db, string migrationId, string table, string column)
+    {
+        if (!HasColumn(db, table, column) || db.Database.GetAppliedMigrations().Contains(migrationId))
+            return;
+
+        if (migrationId == "20260908224021_PreservePendingPackIntent")
+        {
+            db.Database.ExecuteSqlRaw("""
+                CREATE INDEX IF NOT EXISTS "IX_PendingReleases_EventId" ON "PendingReleases" ("EventId");
+                CREATE INDEX IF NOT EXISTS "IX_PendingReleases_Status_ReleasableAt" ON "PendingReleases" ("Status", "ReleasableAt");
+                """);
+        }
+
+        // Older SQLite releases added this column before its migration existed.
+        db.Database.ExecuteSqlInterpolated(
+            $"INSERT OR IGNORE INTO \"__EFMigrationsHistory\" (\"MigrationId\", \"ProductVersion\") VALUES ({migrationId}, '9.0.0')");
     }
 
     private static bool HasColumn(SportarrDbContext db, string table, string column)

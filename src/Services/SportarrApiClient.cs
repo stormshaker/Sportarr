@@ -636,6 +636,11 @@ public class SportarrApiClient
     /// </summary>
     public async Task<List<Team>?> GetLeagueTeamsAsync(string leagueId)
     {
+        return (await GetLeagueTeamSelectionAsync(leagueId))?.Teams;
+    }
+
+    public async Task<SportarrApiTeamsResponse?> GetLeagueTeamSelectionAsync(string leagueId)
+    {
         try
         {
             var url = $"{_apiBaseUrl}/list/teams/{Uri.EscapeDataString(leagueId)}";
@@ -652,12 +657,13 @@ public class SportarrApiClient
                 // Only deserialize if it's actually an array
                 if (listElement.ValueKind == JsonValueKind.Array)
                 {
-                    return JsonSerializer.Deserialize<List<Team>>(listElement.GetRawText(), _jsonOptions) ?? new List<Team>();
+                    return JsonSerializer.Deserialize<SportarrApiTeamsResponse>(json, _jsonOptions)
+                        ?? new SportarrApiTeamsResponse { Teams = new List<Team>() };
                 }
             }
 
             // list is null, an object (error message), or missing - return empty
-            return new List<Team>();
+            return new SportarrApiTeamsResponse { Teams = new List<Team>() };
         }
         catch (Exception ex)
         {
@@ -755,7 +761,7 @@ public class SportarrApiClient
     /// CRITICAL: Used to determine when to trigger automatic searches
     /// Uses Sportarr API's ACTUAL endpoint: /lookup/event_tv/{eventId}
     /// </summary>
-    public async Task<TVSchedule?> GetEventTVScheduleAsync(string eventId)
+    public async Task<List<TVSchedule>?> GetEventTVScheduleAsync(string eventId)
     {
         try
         {
@@ -773,7 +779,12 @@ public class SportarrApiClient
 
             var json = await response.Content.ReadAsStringAsync();
             var result = JsonSerializer.Deserialize<SportarrApiTVScheduleResponse>(json, _jsonOptions);
-            return result?.Data?.TVSchedule?.FirstOrDefault();
+            return result?.Data?.TVSchedule?
+                .Where(schedule => schedule != null &&
+                    (string.Equals(schedule.EventId, eventId, StringComparison.Ordinal) ||
+                     (eventId.Length > 0 && eventId.All(char.IsAsciiDigit) &&
+                      string.Equals(schedule.TsdbEventId, eventId, StringComparison.Ordinal))))
+                .ToList();
         }
         catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
         {
@@ -903,6 +914,45 @@ public class SportarrApiClient
         catch (Exception ex)
         {
             _logger.LogError(ex, "[SportarrAPI] Failed to get livescores for league: {LeagueId}", leagueId);
+            return null;
+        }
+    }
+
+    public string DvrLiveSourceOrigin => _apiBaseUrl;
+
+    public async Task<List<DvrLiveScore>?> GetDvrLivescoreByLeagueAsync(
+        string leagueId, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var origin = _apiBaseUrl;
+        var url = $"{origin}/livescore/league/{Uri.EscapeDataString(leagueId)}";
+        var cacheKey = $"dvr-livescore:{url}";
+        if (_cache.TryGetValue(cacheKey, out List<DvrLiveScore>? cached))
+            return cached;
+
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(15));
+            using var response = await _httpClient.GetAsync(url, timeout.Token);
+            response.EnsureSuccessStatusCode();
+            var json = await response.Content.ReadAsStringAsync(timeout.Token);
+            if (_apiBaseUrl != origin)
+                return null;
+            var scores = JsonSerializer.Deserialize<SportarrApiResponse<DvrLiveScore>>(json, _jsonOptions)?.Data
+                ?.Select(score => score with { RequestOrigin = origin }).ToList();
+            if (scores != null)
+                _cache.Set(cacheKey, scores, TimeSpan.FromSeconds(30));
+            return scores;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[DVR] Live event status is unavailable for league {LeagueId}", leagueId);
+            _cache.Set<List<DvrLiveScore>?>(cacheKey, null, TimeSpan.FromSeconds(10));
             return null;
         }
     }
@@ -1092,7 +1142,12 @@ public class SportarrApiClient
     /// </summary>
     private async Task<List<Team>?> GetAllTeamsForSportsBulkAsync(List<string> supportedSports)
     {
-        var sportParam = Uri.EscapeDataString(string.Join(",", supportedSports));
+        var querySports = supportedSports
+            .Concat(TeamLeagueDiscoveryService.SupportedSports.Where(alias =>
+                supportedSports.Any(sport => LeagueSportRules.AreEquivalentSports(sport, alias))))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var sportParam = Uri.EscapeDataString(string.Join(",", querySports));
         var url = $"{_apiBaseUrl}/all/teams?sport={sportParam}";
         using var response = await _httpClient.GetAsync(url);
         response.EnsureSuccessStatusCode();
@@ -1114,6 +1169,14 @@ public class SportarrApiClient
         // "Football" also returns Australian Football teams. Keep only
         // exact sport matches for the requested set.
         var requested = new HashSet<string>(supportedSports, StringComparer.OrdinalIgnoreCase);
+
+        foreach (var team in teams)
+        {
+            var sport = team.Sport?.Trim();
+            team.Sport = supportedSports.FirstOrDefault(s => string.Equals(s, sport, StringComparison.OrdinalIgnoreCase))
+                ?? supportedSports.FirstOrDefault(s => LeagueSportRules.AreEquivalentSports(s, sport))
+                ?? sport;
+        }
 
         // Deduplicate by ExternalId (teams can appear in multiple
         // leagues; kept for parity with the per-league aggregator).
@@ -1217,6 +1280,50 @@ public class SportarrApiClient
     #endregion
 
     #region Plex Metadata API
+
+    /// <summary>
+    /// Fetch the authoritative episode number for one event by exact identity.
+    /// </summary>
+    public async Task<int?> GetEpisodeNumberFromApiAsync(string externalId)
+    {
+        if (string.IsNullOrWhiteSpace(externalId))
+            return null;
+
+        try
+        {
+            var root = _apiBaseUrl.Replace("/api/v2/json", string.Empty).TrimEnd('/');
+            var url = $"{root}/api/metadata/agents/episode/{Uri.EscapeDataString(externalId)}";
+            using var response = await _httpClient.GetAsync(url);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning(
+                    "[SportarrAPI] Failed to fetch episode number for event {EventId}: HTTP {StatusCode}",
+                    externalId, response.StatusCode);
+                return null;
+            }
+
+            var json = await response.Content.ReadAsStringAsync();
+            var episode = JsonSerializer.Deserialize<PlexEpisode>(json, _jsonOptions);
+            if (episode?.EpisodeNumber is not > 0)
+                return null;
+
+            if (episode.EpisodeNumber == 1 && episode.EpisodeNumberAuthoritative != true)
+            {
+                _logger.LogWarning(
+                    "[SportarrAPI] Event {EventId} returned an unconfirmed E01 fallback",
+                    externalId);
+                return null;
+            }
+
+            return episode.EpisodeNumber;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[SportarrAPI] Failed to fetch episode number for event {EventId}", externalId);
+            return null;
+        }
+    }
 
     /// <summary>
     /// Fetch episode numbers from sportarr.net Plex metadata API.
@@ -1428,6 +1535,9 @@ public class PlexEpisode
     [JsonPropertyName("episode_number")]
     public int? EpisodeNumber { get; set; }
 
+    [JsonPropertyName("episode_number_authoritative")]
+    public bool? EpisodeNumberAuthoritative { get; set; }
+
     [JsonPropertyName("season_number")]
     public int? SeasonNumber { get; set; }
 
@@ -1510,6 +1620,7 @@ public class MetaData
 {
     public bool Cached { get; set; }
     public string? Source { get; set; }
+    public List<string>? RecentTeamIds { get; set; }
 }
 /// <summary>
 /// Response wrapper for all leagues endpoint
@@ -1567,10 +1678,12 @@ public class ScheduleData
 public class TVSchedule
 {
     public string? EventId { get; set; }
+    public string? TsdbEventId { get; set; }
     public string? EventName { get; set; }
     public DateTime? BroadcastTime { get; set; }
     public string? Network { get; set; }
     public string? Channel { get; set; }
+    public string? ChannelId { get; set; }
     public string? StreamingService { get; set; }
     public string? Country { get; set; }
 }

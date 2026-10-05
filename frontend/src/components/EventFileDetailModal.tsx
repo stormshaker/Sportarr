@@ -7,7 +7,6 @@ import apiClient from '../api/client';
 import { toast } from 'sonner';
 import FileMetadataEditModal from './FileMetadataEditModal';
 import type { FileMetadataEditorValues } from './FileMetadataEditor';
-import { errorMessage } from '../utils/errors';
 
 interface EventFile {
   id: number;
@@ -167,8 +166,8 @@ export default function EventFileDetailModal({
         onClose();
       }
     },
-    onError: (error: unknown) => {
-      toast.error(errorMessage(error, 'Failed to delete file'));
+    onError: (error: any) => {
+      toast.error(error.response?.data?.detail || 'Failed to delete file');
     },
   });
 
@@ -180,7 +179,7 @@ export default function EventFileDetailModal({
       });
       return response.data;
     },
-    onSuccess: async () => {
+    onSuccess: async (data) => {
       let message = 'All files deleted';
       if (deleteAllBlocklistAction === 'blocklistAndSearch') {
         message = 'All files deleted, releases blocklisted, searching for replacements...';
@@ -200,8 +199,8 @@ export default function EventFileDetailModal({
       await queryClient.refetchQueries({ queryKey: ['leagues'] });
       onClose();
     },
-    onError: (error: unknown) => {
-      toast.error(errorMessage(error, 'Failed to delete files'));
+    onError: (error: any) => {
+      toast.error(error.response?.data?.detail || 'Failed to delete files');
     },
   });
 
@@ -722,7 +721,7 @@ export default function EventFileDetailModal({
           eventId={eventId}
           onSaved={async (updated) => {
             if (updated && updated.length) {
-              const byId = new Map(updated.map((u) => [u.id, u]));
+              const byId = new Map(updated.map((u: any) => [u.id, u]));
               setLocalFiles((prev) => prev.map((f) => (byId.has(f.id) ? { ...f, ...byId.get(f.id) } : f)));
             }
             clearSelected();

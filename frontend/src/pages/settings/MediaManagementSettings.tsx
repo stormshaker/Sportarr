@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { PlusIcon, FolderIcon, CheckIcon, XMarkIcon, CloudArrowDownIcon } from '@heroicons/react/24/outline';
+import { PlusIcon, FolderIcon, CheckIcon, XMarkIcon, CloudArrowDownIcon, ExclamationTriangleIcon, InformationCircleIcon } from '@heroicons/react/24/outline';
 import { toast } from 'sonner';
 import { useQueryClient } from '@tanstack/react-query';
 import { apiGet, apiPost, apiPut, apiDelete } from '../../utils/api';
@@ -7,6 +7,8 @@ import { runSettingsSave } from '../../hooks/useSettings';
 import FileBrowserModal from '../../components/FileBrowserModal';
 import SettingsHeader from '../../components/SettingsHeader';
 import { useUnsavedChanges } from '../../hooks/useUnsavedChanges';
+import { NAMING_CONTEXT_PANEL, NAMING_GUIDANCE } from '../../utils/designTokens';
+import { getNamingWarning, NAMING_CONTEXT_TEXT, renderNamingExample } from '../../utils/namingGuidance';
 
 interface NamingPreset {
   format: string;
@@ -47,6 +49,7 @@ interface MediaManagementSettingsData {
   // Granular folder options - cascading hierarchy
   createLeagueFolders: boolean;
   createSeasonFolders: boolean;
+  createEventTypeFolders: boolean;
   createEventFolders: boolean;
   leagueFolderFormat: string;
   seasonFolderFormat: string;
@@ -93,6 +96,7 @@ const DEFAULT_MEDIA_MANAGEMENT_SETTINGS: MediaManagementSettingsData = {
     // Granular folder options - default: league/season enabled, event disabled
     createLeagueFolders: true,
     createSeasonFolders: true,
+    createEventTypeFolders: false,
     createEventFolders: false,
     leagueFolderFormat: '{Series}',
     seasonFolderFormat: 'Season {Season}',
@@ -142,7 +146,7 @@ export default function MediaManagementSettings({ showAdvanced: propShowAdvanced
   // so we don't walk the disk unsolicited every time the user opens the
   // Settings page.
   const [unmappedByRoot, setUnmappedByRoot] = useState<Record<number, { loading: boolean; folders: { name: string; path: string }[]; error?: string; expanded: boolean }>>({});
-  const [, setLoading] = useState(true);
+  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [showAddFolderModal, setShowAddFolderModal] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<number | null>(null);
@@ -155,8 +159,10 @@ export default function MediaManagementSettings({ showAdvanced: propShowAdvanced
   const [showFileBrowser, setShowFileBrowser] = useState(false);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const initialSettings = useRef<MediaManagementSettingsData | null>(null);
-  const [namingPresets, setNamingPresets] = useState<NamingPresets | null>(null);
-  const [selectedFilePreset, setSelectedFilePreset] = useState<string>('');
+  const [namingPresetResponse, setNamingPresetResponse] = useState<{
+    enableMultiPartEpisodes: boolean;
+    presets: NamingPresets;
+  } | null>(null);
 
   // Show Advanced toggle - persisted per page to localStorage
   const [showAdvanced, setShowAdvanced] = useState(() => {
@@ -170,43 +176,45 @@ export default function MediaManagementSettings({ showAdvanced: propShowAdvanced
   }, [showAdvanced]);
 
   // Use unsaved changes hook
-  useUnsavedChanges(hasUnsavedChanges);
+  const { blockNavigation } = useUnsavedChanges(hasUnsavedChanges);
 
   // Media Management Settings stored in database
   const [settings, setSettings] = useState<MediaManagementSettingsData>(() => ({ ...DEFAULT_MEDIA_MANAGEMENT_SETTINGS }));
+  const namingPresets = namingPresetResponse?.enableMultiPartEpisodes === settings.enableMultiPartEpisodes
+    ? namingPresetResponse.presets : null;
+  const selectedFilePreset = Object.entries(namingPresets?.file ?? {})
+    .find(([, preset]) => preset.format === settings.standardFileFormat)?.[0] ?? '';
+  const namingWarning = getNamingWarning(settings.standardFileFormat, settings.renameEvents);
   const [newWatchFolder, setNewWatchFolder] = useState('');
 
   // Load settings and root folders from API on mount
   useEffect(() => {
     loadSettings();
     fetchRootFolders();
-    loadNamingPresets();
   }, []);
 
-  const loadNamingPresets = async () => {
-    try {
-      const response = await apiGet(`/api/trash/naming-presets?enableMultiPartEpisodes=${settings.enableMultiPartEpisodes}`);
-      if (response.ok) {
-        const data = await response.json();
-        setNamingPresets(data);
-      }
-    } catch (error) {
-      console.error('Failed to load naming presets:', error);
-    }
-  };
-
-  // Reload presets when multi-part setting changes
   useEffect(() => {
-    if (namingPresets) {
-      loadNamingPresets();
-    }
+    let active = true;
+    const enableMultiPartEpisodes = settings.enableMultiPartEpisodes;
+    const loadNamingPresets = async () => {
+      try {
+        const response = await apiGet(`/api/trash/naming-presets?enableMultiPartEpisodes=${enableMultiPartEpisodes}`);
+        if (response.ok) {
+          const data = await response.json();
+          if (active) setNamingPresetResponse({ enableMultiPartEpisodes, presets: data });
+        }
+      } catch (error) {
+        if (active) console.error('Failed to load naming presets:', error);
+      }
+    };
+    void loadNamingPresets();
+    return () => { active = false; };
   }, [settings.enableMultiPartEpisodes]);
 
   const handleApplyFilePreset = (presetKey: string) => {
     if (!namingPresets?.file?.[presetKey]) return;
     const preset = namingPresets.file[presetKey];
     updateSetting('standardFileFormat', preset.format);
-    setSelectedFilePreset(presetKey);
     toast.success('Naming preset applied', {
       description: preset.description,
     });
@@ -824,6 +832,13 @@ export default function MediaManagementSettings({ showAdvanced: propShowAdvanced
             </div>
           </label>
 
+          {!settings.renameEvents && (
+            <div role="alert" className={NAMING_GUIDANCE}>
+              <ExclamationTriangleIcon className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" aria-hidden="true" />
+              <p>{namingWarning}</p>
+            </div>
+          )}
+
           <label className="flex items-start space-x-3 cursor-pointer">
             <input
               type="checkbox"
@@ -879,20 +894,20 @@ export default function MediaManagementSettings({ showAdvanced: propShowAdvanced
           {settings.renameEvents && (
             <>
               <div>
-                <div className="flex items-center justify-between mb-2">
+                <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                   <label className="block text-white font-medium">Standard Event Format</label>
                   {namingPresets?.file && Object.keys(namingPresets.file).length > 0 && (
-                    <div className="flex items-center gap-2">
+                    <div className="flex min-w-0 items-center gap-2">
                       <CloudArrowDownIcon className="w-4 h-4 text-purple-400" />
                       <select
                         value={selectedFilePreset}
                         onChange={(e) => handleApplyFilePreset(e.target.value)}
-                        className="px-3 py-1 bg-gray-800 border border-purple-700 rounded text-sm text-purple-200 focus:outline-none focus:border-purple-500"
+                        className="min-w-0 flex-1 rounded border border-purple-700 bg-gray-800 px-3 py-1 text-sm text-purple-200 focus:border-purple-500 focus:outline-none sm:flex-none"
                       >
-                        <option value="" className="bg-gray-800 text-gray-300">TRaSH Naming Presets...</option>
+                        <option value="" disabled className="bg-gray-800 text-gray-300">Custom format (choose a preset)</option>
                         {Object.entries(namingPresets.file).map(([key, preset]) => (
                           <option key={key} value={key} className="bg-gray-800 text-white">
-                            {key.replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                            {key === 'original' ? 'Original Filename (check source)' : key.replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
                             {preset.supportsMultiPart ? ' (Multi-Part)' : ''}
                           </option>
                         ))}
@@ -904,14 +919,22 @@ export default function MediaManagementSettings({ showAdvanced: propShowAdvanced
                   <input
                     type="text"
                     value={settings.standardFileFormat}
-                    onChange={(e) => {
-                      updateSetting('standardFileFormat', e.target.value);
-                      setSelectedFilePreset(''); // Clear preset selection when manually editing
-                    }}
+                    onChange={(e) => updateSetting('standardFileFormat', e.target.value)}
                     className="w-full px-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-red-600 font-mono"
                     placeholder="{Series} - {Season}{Episode}{Part} - {Event Title} - {Quality Full} - {Sportarr Id}"
                   />
                 </div>
+
+                <div role="note" className={`mt-3 ${NAMING_CONTEXT_PANEL}`}>
+                  <InformationCircleIcon className="mt-0.5 h-4 w-4 shrink-0 text-gray-400" aria-hidden="true" />
+                  <p>{NAMING_CONTEXT_TEXT}</p>
+                </div>
+                {namingWarning && (
+                  <div role="alert" className={`mt-2 ${NAMING_GUIDANCE}`}>
+                    <ExclamationTriangleIcon className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" aria-hidden="true" />
+                    <p>{namingWarning}</p>
+                  </div>
+                )}
 
                 {/* Token Helper */}
                 <div className="mt-3 p-4 bg-black/30 rounded-lg border border-gray-800">
@@ -956,18 +979,11 @@ export default function MediaManagementSettings({ showAdvanced: propShowAdvanced
                 <div className="mt-3 p-4 bg-gradient-to-r from-blue-950/30 to-purple-950/30 border border-blue-900/50 rounded-lg">
                   <p className="text-sm font-medium text-blue-300 mb-2">Preview:</p>
                   <p className="text-white font-mono text-sm break-all">
-                    {(settings.standardFileFormat || '')
-                      .replace(/{Series}/g, 'MMA League')
-                      .replace(/{Season}/g, 's2024')
-                      .replace(/{Episode}/g, 'e12')
-                      .replace(/{Part}/g, settings.enableMultiPartEpisodes ? ' - pt3' : '')
-                      .replace(/{Event Title}/g, 'Event 100 Main Event')
-                      .replace(/{League}/g, 'MMA League')
-                      .replace(/{Event Date}/g, '2024-11-16')
-                      .replace(/{Quality Full}/g, 'Bluray-1080p')
-                      .replace(/{Sportarr Id}/g, 'sportarr-ev-2338110')
-                      .replace(/{Release Group}/g, 'GROUP')
-                    }.mkv
+                    {renderNamingExample(settings.standardFileFormat || '', {
+                      seasonYear: 2024,
+                      qualityFull: 'Bluray-1080p',
+                      includePart: settings.enableMultiPartEpisodes,
+                    })}
                   </p>
                   <p className="text-xs text-gray-500 mt-2">
                     This shows how your events will be named with the current format
@@ -998,6 +1014,7 @@ export default function MediaManagementSettings({ showAdvanced: propShowAdvanced
                 // Cascade disable child options when parent is disabled
                 if (!e.target.checked) {
                   updateSetting('createSeasonFolders', false);
+                  updateSetting('createEventTypeFolders', false);
                   updateSetting('createEventFolders', false);
                 }
               }}
@@ -1021,6 +1038,7 @@ export default function MediaManagementSettings({ showAdvanced: propShowAdvanced
                   updateSetting('createSeasonFolders', e.target.checked);
                   // Cascade disable child option when parent is disabled
                   if (!e.target.checked) {
+                    updateSetting('createEventTypeFolders', false);
                     updateSetting('createEventFolders', false);
                   }
                 }}
@@ -1035,9 +1053,29 @@ export default function MediaManagementSettings({ showAdvanced: propShowAdvanced
             </label>
           )}
 
+          {settings.createLeagueFolders && settings.createSeasonFolders && (
+            <label className="flex items-start space-x-3 cursor-pointer ml-8 border-l-2 border-gray-700 pl-4 sm:ml-16">
+              <input
+                type="checkbox"
+                checked={settings.createEventTypeFolders}
+                onChange={(e) => updateSetting('createEventTypeFolders', e.target.checked)}
+                className="mt-1 w-5 h-5 rounded border-gray-600 bg-gray-800 text-red-600 focus:ring-red-600"
+              />
+              <div className="min-w-0 flex-1">
+                <span className="text-white font-medium">Group Events by Type or Session</span>
+                <p className="text-sm text-gray-400 mt-1">
+                  Add a folder within each season for recognized event types and sessions. Leagues without type rules keep their current layout.
+                </p>
+                <p className="text-xs text-gray-500 mt-1">
+                  Unknown types go in Other. This does not move existing files until you reorganize folders on rename.
+                </p>
+              </div>
+            </label>
+          )}
+
           {/* Create Event Folders - only visible if Season Folders enabled */}
           {settings.createLeagueFolders && settings.createSeasonFolders && (
-            <label className="flex items-start space-x-3 cursor-pointer ml-16 border-l-2 border-gray-700 pl-4">
+            <label className="flex items-start space-x-3 cursor-pointer ml-8 border-l-2 border-gray-700 pl-4 sm:ml-16">
               <input
                 type="checkbox"
                 checked={settings.createEventFolders}
@@ -1047,7 +1085,7 @@ export default function MediaManagementSettings({ showAdvanced: propShowAdvanced
               <div className="flex-1">
                 <span className="text-white font-medium">Create Event Folders</span>
                 <p className="text-sm text-gray-400 mt-1">
-                  Create a folder for each event (e.g., <code className="text-purple-400 bg-gray-800 px-1 rounded">/UFC/Season 2024/UFC 310/</code>)
+                  Create a folder for each event (e.g., <code className="text-purple-400 bg-gray-800 px-1 rounded">/UFC/Season 2024/{settings.createEventTypeFolders && 'PPV/'}UFC 310/</code>)
                 </p>
                 <p className="text-xs text-gray-500 mt-1">
                   Multi-part events (Early Prelims, Prelims, Main Card) will be grouped in the same event folder.
@@ -1081,18 +1119,26 @@ export default function MediaManagementSettings({ showAdvanced: propShowAdvanced
           {/* Path Preview */}
           <div className="mt-4 p-4 bg-gradient-to-r from-blue-950/30 to-purple-950/30 border border-blue-900/50 rounded-lg">
             <p className="text-sm font-medium text-blue-300 mb-2">Folder Structure Preview:</p>
-            <p className="text-white font-mono text-sm">
+            <p className="text-white font-mono text-sm break-all">
               /root/
               {settings.createLeagueFolders && <span className="text-green-400">UFC/</span>}
               {settings.createLeagueFolders && settings.createSeasonFolders && <span className="text-yellow-400">Season 2024/</span>}
+              {settings.createLeagueFolders && settings.createSeasonFolders && settings.createEventTypeFolders && <span className="text-blue-400">PPV/</span>}
               {settings.createLeagueFolders && settings.createSeasonFolders && settings.createEventFolders && <span className="text-purple-400">UFC 310/</span>}
               <span className="text-gray-400">filename.mkv</span>
             </p>
+            {settings.createLeagueFolders && settings.createSeasonFolders && settings.createEventTypeFolders && (
+              <p className="text-xs text-gray-400 mt-2 break-all">
+                Examples: WWE/Season 2026/RAW/ and Formula 1/Season 2026/Race/.
+              </p>
+            )}
             <p className="text-xs text-gray-500 mt-2">
               {!settings.createLeagueFolders && "All files will be stored directly in the root folder."}
               {settings.createLeagueFolders && !settings.createSeasonFolders && "Files organized by league only."}
-              {settings.createLeagueFolders && settings.createSeasonFolders && !settings.createEventFolders && "Files organized by league and season (Plex TV show style)."}
-              {settings.createLeagueFolders && settings.createSeasonFolders && settings.createEventFolders && "Files organized by league, season, and event."}
+              {settings.createLeagueFolders && settings.createSeasonFolders && !settings.createEventTypeFolders && !settings.createEventFolders && "Files organized by league and season (Plex TV show style)."}
+              {settings.createLeagueFolders && settings.createSeasonFolders && settings.createEventTypeFolders && !settings.createEventFolders && "Recognized events are grouped by type within each season."}
+              {settings.createLeagueFolders && settings.createSeasonFolders && !settings.createEventTypeFolders && settings.createEventFolders && "Files organized by league, season, and event."}
+              {settings.createLeagueFolders && settings.createSeasonFolders && settings.createEventTypeFolders && settings.createEventFolders && "Recognized events are grouped by type, then by event."}
             </p>
           </div>
 

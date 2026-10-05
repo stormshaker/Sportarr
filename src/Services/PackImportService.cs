@@ -20,7 +20,7 @@ public class PackImportService
     private readonly ConfigService _configService;
     private readonly DiskSpaceService _diskSpaceService;
     private readonly ReleaseEvaluator _releaseEvaluator;
-    private readonly SportarrApiClient _sportarrApiClient;
+    private readonly EpisodeNumberResolver _episodeNumberResolver;
     private readonly ILogger<PackImportService> _logger;
     private readonly NotificationService _notificationService;
     private readonly IMetadataWriterService _metadataWriterService;
@@ -34,7 +34,7 @@ public class PackImportService
         ConfigService configService,
         DiskSpaceService diskSpaceService,
         ReleaseEvaluator releaseEvaluator,
-        SportarrApiClient sportarrApiClient,
+        EpisodeNumberResolver episodeNumberResolver,
         ILogger<PackImportService> logger,
         NotificationService notificationService,
         IMetadataWriterService metadataWriterService)
@@ -45,7 +45,7 @@ public class PackImportService
         _configService = configService;
         _diskSpaceService = diskSpaceService;
         _releaseEvaluator = releaseEvaluator;
-        _sportarrApiClient = sportarrApiClient;
+        _episodeNumberResolver = episodeNumberResolver;
         _logger = logger;
         _notificationService = notificationService;
         _metadataWriterService = metadataWriterService;
@@ -804,7 +804,8 @@ public class PackImportService
                 null, // requestedPart
                 eventInfo.Sport,
                 true, // enableMultiPartEpisodes
-                eventInfo.Title);
+                eventInfo.Title,
+                leagueName: eventInfo.League?.Name);
 
             customFormatScore = evaluation.CustomFormatScore;
             matchedFormats = evaluation.MatchedFormats?.Select(mf => mf.Name).ToList() ?? new List<string>();
@@ -817,7 +818,7 @@ public class PackImportService
         // when set, fall back to the legacy free-space heuristic otherwise.
         var rootFolders = await RootFolderLoader.LoadAsync(_db, _diskSpaceService);
         var rootFolder = GetRootFolderForLeague(settings, rootFolders, eventInfo.League, fileInfo.Length);
-        var destinationPath = await BuildDestinationPath(settings, eventInfo, parsed, fileInfo.Extension, rootFolder);
+        var destinationPath = await BuildDestinationPath(settings, eventInfo, parsed, fileInfo.Extension, rootFolder, sourceFile);
 
         _logger.LogDebug("[Pack Import] Destination path: {Path}", destinationPath);
 
@@ -904,14 +905,15 @@ public class PackImportService
         Event eventInfo,
         ParsedFileInfo parsed,
         string extension,
-        string rootFolder)
+        string rootFolder,
+        string sourceFile)
     {
         var destinationPath = rootFolder;
 
         // IMPORTANT: Fetch episode number from API BEFORE building folder path
         // This ensures the {Episode} token in EventFolderFormat has the correct value
         // Episode number is the source of truth from sportarr.net API for Plex/Jellyfin/Emby metadata
-        var episodeNumber = await GetApiEpisodeNumberAsync(eventInfo);
+        var episodeNumber = await _episodeNumberResolver.ResolveBatchAsync(eventInfo);
         if (episodeNumber != eventInfo.EpisodeNumber)
         {
             eventInfo.EpisodeNumber = episodeNumber;
@@ -940,12 +942,13 @@ public class PackImportService
             {
                 EventTitle = eventInfo.Title,
                 EventTitleThe = eventInfo.Title,
+                SportarrId = eventInfo.ExternalId ?? string.Empty,
                 AirDate = brandingDate,
                 Quality = parsed.Quality ?? "Unknown",
                 QualityFull = _parser.BuildQualityString(parsed),
                 ReleaseGroup = parsed.ReleaseGroup ?? string.Empty,
                 OriginalTitle = parsed.EventTitle,
-                OriginalFilename = Path.GetFileNameWithoutExtension(parsed.EventTitle),
+                OriginalFilename = FileNamingService.GetOriginalFilenameToken(sourceFile),
                 Series = eventInfo.League?.Name ?? eventInfo.Sport,
                 Season = eventInfo.SeasonNumber?.ToString("0000") ?? eventInfo.Season ?? brandingDate.Year.ToString(),
                 Episode = episodeNumber.ToString("00"),
@@ -956,7 +959,7 @@ public class PackImportService
         }
         else
         {
-            filename = parsed.EventTitle + extension;
+            filename = FileNamingService.GetSourceFilename(sourceFile);
         }
 
         destinationPath = Path.Combine(destinationPath, filename);
@@ -976,60 +979,6 @@ public class PackImportService
         }
 
         return destinationPath;
-    }
-
-    /// <summary>
-    /// Get episode number from the sportarr.net API - this is the source of truth for Plex/Jellyfin/Emby metadata.
-    /// Falls back to existing episode number if API call fails.
-    /// </summary>
-    private async Task<int> GetApiEpisodeNumberAsync(Event eventInfo)
-    {
-        // If event already has an episode number from API sync, use it
-        if (eventInfo.EpisodeNumber.HasValue && eventInfo.EpisodeNumber.Value > 0)
-        {
-            _logger.LogDebug("[Episode Number] Using existing API episode number E{EpisodeNumber} for event {EventTitle}",
-                eventInfo.EpisodeNumber.Value, eventInfo.Title);
-            return eventInfo.EpisodeNumber.Value;
-        }
-
-        // No episode number - fetch from API
-        if (!eventInfo.LeagueId.HasValue)
-        {
-            _logger.LogWarning("[Episode Number] No league for event {EventTitle}, defaulting to episode 1", eventInfo.Title);
-            return 1;
-        }
-
-        var league = await _db.Leagues.FindAsync(eventInfo.LeagueId.Value);
-        if (league == null || string.IsNullOrEmpty(league.ExternalId))
-        {
-            _logger.LogWarning("[Episode Number] League not found or has no ExternalId for event {EventTitle}, defaulting to episode 1", eventInfo.Title);
-            return 1;
-        }
-
-        var season = eventInfo.Season ?? eventInfo.SeasonNumber?.ToString() ?? (eventInfo.BroadcastDate ?? eventInfo.EventDate).Year.ToString();
-
-        try
-        {
-            var apiEpisodeMap = await _sportarrApiClient.GetEpisodeNumbersFromApiAsync(league.ExternalId, season);
-            if (apiEpisodeMap != null && !string.IsNullOrEmpty(eventInfo.ExternalId) &&
-                apiEpisodeMap.TryGetValue(eventInfo.ExternalId, out var apiEpisodeNumber))
-            {
-                _logger.LogInformation("[Episode Number] Got episode E{EpisodeNumber} from API for event {EventTitle}",
-                    apiEpisodeNumber, eventInfo.Title);
-                return apiEpisodeNumber;
-            }
-            else
-            {
-                _logger.LogWarning("[Episode Number] Event {EventTitle} not found in API episode map (ExternalId: {ExternalId}), defaulting to episode 1",
-                    eventInfo.Title, eventInfo.ExternalId);
-                return 1;
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "[Episode Number] Failed to fetch API episode number for event {EventTitle}, defaulting to episode 1", eventInfo.Title);
-            return 1;
-        }
     }
 
     /// <summary>

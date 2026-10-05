@@ -4,7 +4,6 @@ import { XMarkIcon } from '@heroicons/react/24/outline';
 import { toast } from 'sonner';
 import apiClient from '../api/client';
 import FileMetadataEditor, { type FileMetadataEditorValues } from './FileMetadataEditor';
-import { errorMessage } from '../utils/errors';
 
 /**
  * Modal wrapper around <FileMetadataEditor> for the post-import edit flow.
@@ -16,14 +15,7 @@ import { errorMessage } from '../utils/errors';
  * no modal, no API call here.
  */
 
-export // What the save returns for each file it wrote, which the caller merges back
-// into its own list by id.
-interface SavedFileMetadata {
-  id: number;
-  [field: string]: unknown;
-}
-
-interface FileMetadataEditModalProps {
+export interface FileMetadataEditModalProps {
   isOpen: boolean;
   onClose: () => void;
   /** Single file id, or list of ids for bulk-edit. */
@@ -34,7 +26,7 @@ interface FileMetadataEditModalProps {
   /** Whether to show PartName/PartNumber. Hide for non-multi-part events. */
   showPartFields?: boolean;
   /** Called after a successful save with the updated EventFile DTOs. */
-  onSaved?: (updated: SavedFileMetadata[]) => void;
+  onSaved?: (updated: any[]) => void;
   /** Context for league-aware Part dropdowns + DB-known release-group list. */
   leagueId?: number;
   eventId?: number;
@@ -78,6 +70,7 @@ export default function FileMetadataEditModal({
       // edits actually translate into a non-empty request body. An empty
       // patch is the most common cause of "save toast appeared but nothing
       // changed" — the editor's local state never picked up the keystrokes.
+      // eslint-disable-next-line no-console
       console.log('[FileMetadataEdit] saving', { fileIds, isBulk, patch, initialValues, values });
 
       if (Object.keys(patch).length === 0) {
@@ -97,12 +90,17 @@ export default function FileMetadataEditModal({
         response = await apiClient.put(`/event-files/${fileIds[0]}`, patch);
         toast.success('File updated');
       }
+      // eslint-disable-next-line no-console
       console.log('[FileMetadataEdit] server response', response.data);
       onSaved?.(Array.isArray(response.data) ? response.data : [response.data]);
       onClose();
-    } catch (err) {
-      const detail = errorMessage(err, 'Save failed');
+    } catch (err: any) {
+      const detail = err?.response?.data?.error
+        ?? err?.response?.data?.detail
+        ?? err?.message
+        ?? 'Save failed';
       toast.error(detail);
+      // eslint-disable-next-line no-console
       console.error('[FileMetadataEdit] save failed', err);
     } finally {
       setSaving(false);
@@ -206,20 +204,13 @@ function stripUntouched(
     'languages', 'indexerFlags', 'partName', 'partNumber',
   ];
   for (const k of keys) {
-    // k is drawn from the key list above, so both sides are the same property
-    // of the same shape; the assignment is what TypeScript cannot follow on
-    // its own across a union of value types.
-    const a = current[k];
-    const b = initial[k];
+    const a = (current as any)[k];
+    const b = (initial as any)[k];
     if (k === 'languages') {
-      if (!arraysEqual((a as string[]) ?? [], (b as string[]) ?? [])) {
-        out.languages = a as FileMetadataEditorValues['languages'];
-      }
+      if (!arraysEqual(a ?? [], b ?? [])) out[k] = a as any;
       continue;
     }
-    if (a !== b) {
-      Object.assign(out, { [k]: a });
-    }
+    if (a !== b) out[k] = a as any;
   }
   return out;
 }

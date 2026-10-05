@@ -4,14 +4,26 @@ using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Sportarr.Api.Data;
+using Sportarr.Api.Helpers;
 using Sportarr.Api.Models;
 using Sportarr.Api.Services;
+using Sportarr.Api.Services.Interfaces;
 using System.Text.Json;
 
 namespace Sportarr.Api.Endpoints;
 
 public static class FollowedTeamsAndTeamsEndpoints
 {
+    // The Follow page table's sortable, filterable columns, keyed by the
+    // field names the endpoint returns.
+    private static readonly Dictionary<string, Func<Team, string?>> TeamCatalogColumns =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["strTeam"] = t => t.Name,
+            ["strSport"] = t => t.Sport,
+            ["strCountry"] = t => t.Country,
+        };
+
     public static IEndpointRouteBuilder MapFollowedTeamsAndTeamsEndpoints(this IEndpointRouteBuilder app)
     {
 // API: Get supported sports for team following
@@ -128,11 +140,20 @@ app.MapGet("/api/followed-teams/{id:int}/leagues", async (int id, SportarrDbCont
         followedTeam.LastLeagueDiscovery = DateTime.UtcNow;
         await db.SaveChangesAsync();
 
-        // Check which leagues are already added to Sportarr
-        var existingLeagueIds = await db.Leagues
+        var monitoredLeagueIds = await db.LeagueTeams
             .AsNoTracking()
-            .Where(l => l.ExternalId != null)
-            .Select(l => l.ExternalId!)
+            .Where(link => link.Monitored && link.Team!.ExternalId == followedTeam.ExternalId)
+            .Select(link => link.LeagueId)
+            .ToListAsync();
+        var followedLeagueIds = await db.Leagues
+            .AsNoTracking()
+            .Where(league => league.Monitored && league.ExternalId != null && monitoredLeagueIds.Contains(league.Id))
+            .Select(league => league.ExternalId!)
+            .ToListAsync();
+        var libraryLeagueIds = await db.Leagues
+            .AsNoTracking()
+            .Where(league => league.ExternalId != null)
+            .Select(league => league.ExternalId!)
             .ToListAsync();
 
         var response = discoveredLeagues.Select(l => new
@@ -143,7 +164,10 @@ app.MapGet("/api/followed-teams/{id:int}/leagues", async (int id, SportarrDbCont
             country = l.Country,
             badgeUrl = l.BadgeUrl,
             eventCount = l.EventCount,
-            isAdded = existingLeagueIds.Contains(l.ExternalId)
+            isAdded = followedLeagueIds.Contains(l.ExternalId) ||
+                (l.LegacyExternalId != null && followedLeagueIds.Contains(l.LegacyExternalId)),
+            isInLibrary = libraryLeagueIds.Contains(l.ExternalId) ||
+                (l.LegacyExternalId != null && libraryLeagueIds.Contains(l.LegacyExternalId))
         }).ToList();
 
         logger.LogInformation("[FOLLOWED-TEAMS] Found {Count} leagues for team {Name}", discoveredLeagues.Count, followedTeam.Name);
@@ -163,7 +187,7 @@ app.MapGet("/api/followed-teams/{id:int}/leagues", async (int id, SportarrDbCont
 });
 
 // API: Bulk add leagues for a followed team
-app.MapPost("/api/followed-teams/{id:int}/add-leagues", async (int id, HttpContext context, SportarrDbContext db, SportarrApiClient sportsDbClient, IServiceScopeFactory scopeFactory, ILogger<Program> logger) =>
+app.MapPost("/api/followed-teams/{id:int}/add-leagues", async (int id, HttpContext context, SportarrDbContext db, SportarrApiClient sportsDbClient, ITaskService taskService, ILogger<Program> logger) =>
 {
     var followedTeam = await db.FollowedTeams.FindAsync(id);
     if (followedTeam == null)
@@ -193,6 +217,16 @@ app.MapPost("/api/followed-teams/{id:int}/add-leagues", async (int id, HttpConte
 
         // Get shared settings for all leagues
         var monitorEvents = body.TryGetProperty("monitorEvents", out var monitorProp) && monitorProp.GetBoolean();
+        var requestedMonitorType = monitorEvents ? MonitorType.Future : MonitorType.None;
+        if (body.TryGetProperty("monitorType", out var monitorTypeProp))
+        {
+            if (monitorTypeProp.ValueKind != JsonValueKind.String ||
+                !Enum.TryParse<MonitorType>(monitorTypeProp.GetString(), true, out requestedMonitorType) ||
+                !Enum.IsDefined(requestedMonitorType))
+            {
+                return Results.BadRequest(new { error = "Invalid monitor type" });
+            }
+        }
         var qualityProfileId = body.TryGetProperty("qualityProfileId", out var qpProp) ? qpProp.GetInt32() : 1;
         var searchOnAdd = body.TryGetProperty("searchOnAdd", out var searchProp) && searchProp.GetBoolean();
         var searchForUpgrades = body.TryGetProperty("searchForUpgrades", out var upgradeProp) && upgradeProp.GetBoolean();
@@ -230,47 +264,105 @@ app.MapPost("/api/followed-teams/{id:int}/add-leagues", async (int id, HttpConte
             await using var leagueTransaction = await db.Database.BeginTransactionAsync();
             try
             {
-                // Check if league already exists
-                var existingLeague = await db.Leagues.FirstOrDefaultAsync(l => l.ExternalId == externalId);
+                var leagueExternalId = externalId!;
+                League? leagueDetails = null;
+                if (!leagueExternalId.StartsWith("lg-", StringComparison.OrdinalIgnoreCase))
+                {
+                    leagueDetails = await sportsDbClient.LookupLeagueAsync(leagueExternalId);
+                    if (string.IsNullOrWhiteSpace(leagueDetails?.ExternalId) ||
+                        !leagueDetails.ExternalId.StartsWith("lg-", StringComparison.OrdinalIgnoreCase) ||
+                        (leagueExternalId.All(char.IsDigit) && leagueDetails.TsdbId != leagueExternalId))
+                    {
+                        erroredLeagues.Add(new { externalId, reason = "League identity could not be verified in the Sportarr API" });
+                        continue;
+                    }
+
+                    leagueExternalId = leagueDetails.ExternalId;
+                }
+
+                var matchingLeagues = await db.Leagues
+                    .Where(l => l.ExternalId == leagueExternalId)
+                    .ToListAsync();
+                if (matchingLeagues.Count > 1)
+                {
+                    erroredLeagues.Add(new { externalId, reason = "Multiple local leagues share this Sportarr ID" });
+                    continue;
+                }
+
+                var existingLeague = matchingLeagues.SingleOrDefault();
+                if (existingLeague == null)
+                {
+                    leagueDetails ??= await sportsDbClient.LookupLeagueAsync(leagueExternalId);
+                    if (leagueDetails == null || leagueDetails.ExternalId != leagueExternalId)
+                    {
+                        erroredLeagues.Add(new { externalId, reason = "League identity could not be verified in the Sportarr API" });
+                        continue;
+                    }
+
+                    var legacyExternalId = leagueExternalId == externalId ? leagueDetails.TsdbId : externalId;
+                    if (!string.IsNullOrWhiteSpace(legacyExternalId) && legacyExternalId.All(char.IsDigit))
+                    {
+                        var legacyLeagues = await db.Leagues
+                            .Where(l => l.ExternalId == legacyExternalId)
+                            .ToListAsync();
+                        if (legacyLeagues.Count > 1 ||
+                            (legacyLeagues.Count == 1 && !LeagueSportRules.AreEquivalentSports(legacyLeagues[0].Sport, leagueDetails.Sport)))
+                        {
+                            erroredLeagues.Add(new { externalId, reason = "Legacy league identity is ambiguous" });
+                            continue;
+                        }
+
+                        existingLeague = legacyLeagues.SingleOrDefault();
+                        if (existingLeague != null)
+                        {
+                            existingLeague.ExternalId = leagueExternalId;
+                            await db.SaveChangesAsync();
+                        }
+                    }
+                }
+
                 if (existingLeague != null)
                 {
+                    var teamLinkChanged = false;
                     // League exists - check if team is already monitored
                     var existingTeamMonitor = await db.LeagueTeams
                         .FirstOrDefaultAsync(lt => lt.LeagueId == existingLeague.Id && lt.Team!.ExternalId == followedTeam.ExternalId);
 
-                    if (existingTeamMonitor != null)
+                    if (existingTeamMonitor?.Monitored == true && existingLeague.Monitored)
                     {
                         skippedLeagues.Add(new { externalId, name = existingLeague.Name, reason = "Team already monitored in this league" });
                     }
                     else
                     {
-                        // Add team monitoring for existing league
-                        // First, ensure the team exists in the Teams table
-                        var team = await db.Teams.FirstOrDefaultAsync(t => t.ExternalId == followedTeam.ExternalId);
-                        if (team == null)
+                        if (existingTeamMonitor == null)
                         {
-                            // Create team record
-                            team = new Team
+                            var team = await db.Teams.FirstOrDefaultAsync(t => t.ExternalId == followedTeam.ExternalId);
+                            if (team == null)
                             {
-                                ExternalId = followedTeam.ExternalId,
-                                Name = followedTeam.Name,
-                                Sport = followedTeam.Sport,
-                                BadgeUrl = followedTeam.BadgeUrl,
-                                Added = DateTime.UtcNow
-                            };
-                            db.Teams.Add(team);
-                            await db.SaveChangesAsync();
-                        }
+                                team = new Team
+                                {
+                                    ExternalId = followedTeam.ExternalId,
+                                    Name = followedTeam.Name,
+                                    Sport = followedTeam.Sport,
+                                    BadgeUrl = followedTeam.BadgeUrl,
+                                    Added = DateTime.UtcNow
+                                };
+                                db.Teams.Add(team);
+                                await db.SaveChangesAsync();
+                            }
 
-                        // Add LeagueTeam entry
-                        var leagueTeam = new LeagueTeam
+                            db.LeagueTeams.Add(new LeagueTeam
+                            {
+                                LeagueId = existingLeague.Id,
+                                TeamId = team.Id,
+                                Monitored = true,
+                                Added = DateTime.UtcNow
+                            });
+                        }
+                        else
                         {
-                            LeagueId = existingLeague.Id,
-                            TeamId = team.Id,
-                            Monitored = true,
-                            Added = DateTime.UtcNow
-                        };
-                        db.LeagueTeams.Add(leagueTeam);
+                            existingTeamMonitor.Monitored = true;
+                        }
                         await db.SaveChangesAsync();
 
                         // Following a team into a league the user already has
@@ -278,9 +370,9 @@ app.MapPost("/api/followed-teams/{id:int}/add-leagues", async (int id, HttpConte
                         // care about. Adding only the join row left the league
                         // unmonitored and unsearched, so their team's events
                         // were never found.
-                        if (monitorEvents && existingLeague.MonitorType == MonitorType.None)
+                        if (requestedMonitorType != MonitorType.None && existingLeague.MonitorType == MonitorType.None)
                         {
-                            existingLeague.MonitorType = MonitorType.Future;
+                            existingLeague.MonitorType = requestedMonitorType;
                         }
                         if (searchOnAdd) existingLeague.SearchForMissingEvents = true;
                         if (searchForUpgrades) existingLeague.SearchForCutoffUnmetEvents = true;
@@ -288,14 +380,35 @@ app.MapPost("/api/followed-teams/{id:int}/add-leagues", async (int id, HttpConte
                         await db.SaveChangesAsync();
 
                         addedLeagues.Add(new { externalId, name = existingLeague.Name, isNew = false });
+                        teamLinkChanged = true;
                     }
                     await leagueTransaction.CommitAsync();
+                    if (teamLinkChanged)
+                    {
+                        try
+                        {
+                            var refreshAlreadyQueued = await db.Tasks.AnyAsync(task =>
+                                task.CommandName == "RefreshLeague" &&
+                                task.Status == Sportarr.Api.Models.TaskStatus.Queued &&
+                                task.Body != null && task.Body.Contains($"\"leagueId\":{existingLeague.Id},") &&
+                                task.Body.Contains("\"scope\":\"full\""));
+                            if (!refreshAlreadyQueued)
+                            {
+                                var syncBody = JsonSerializer.Serialize(new { leagueId = existingLeague.Id, scope = "full" });
+                                await taskService.QueueTaskAsync($"Deep Sync {existingLeague.Name}", "RefreshLeague", priority: 0, body: syncBody);
+                            }
+                        }
+                        catch (Exception syncError)
+                        {
+                            logger.LogError(syncError, "[FOLLOWED-TEAMS] Could not queue team sync for league {LeagueId}", existingLeague.Id);
+                        }
+                    }
                     continue;
                 }
 
                 // Fetch league details from API
-                var leagueDetails = await sportsDbClient.LookupLeagueAsync(externalId!);
-                if (leagueDetails == null)
+                leagueDetails ??= await sportsDbClient.LookupLeagueAsync(leagueExternalId);
+                if (leagueDetails == null || leagueDetails.ExternalId != leagueExternalId)
                 {
                     erroredLeagues.Add(new { externalId, reason = "League not found in Sportarr API" });
                     continue;
@@ -303,11 +416,11 @@ app.MapPost("/api/followed-teams/{id:int}/add-leagues", async (int id, HttpConte
 
                 // Create the new league
                 // Determine MonitorType based on monitorEvents boolean
-                var monitorType = monitorEvents ? MonitorType.Future : MonitorType.None;
+                var monitorType = requestedMonitorType;
 
                 var newLeague = new League
                 {
-                    ExternalId = externalId,
+                    ExternalId = leagueExternalId,
                     Name = leagueDetails.Name,
                     Sport = leagueDetails.Sport,
                     Country = leagueDetails.Country,
@@ -360,6 +473,16 @@ app.MapPost("/api/followed-teams/{id:int}/add-leagues", async (int id, HttpConte
                 await leagueTransaction.CommitAsync();
 
                 logger.LogInformation("[FOLLOWED-TEAMS] Added league {LeagueName} with team {TeamName} monitored", newLeague.Name, followedTeam.Name);
+
+                try
+                {
+                    var initialSyncBody = JsonSerializer.Serialize(new { leagueId = newLeague.Id, scope = "full" });
+                    await taskService.QueueTaskAsync($"Deep Sync {newLeague.Name}", "RefreshLeague", priority: 0, body: initialSyncBody);
+                }
+                catch (Exception syncError)
+                {
+                    logger.LogError(syncError, "[FOLLOWED-TEAMS] Could not queue initial sync for league {LeagueId}", newLeague.Id);
+                }
             }
             catch (Exception ex)
             {
@@ -555,13 +678,14 @@ app.MapGet("/api/teams/search/{query}", async (string query, SportarrApiClient s
 });
 
 // API: Get all teams for supported sports (see TeamLeagueDiscoveryService.SupportedSports)
-// Used by the Add Team page to show all teams that can be followed
-// Optional q and limit narrow the response server-side. Without them this
-// serves the whole catalog, which on a normal install is 17k teams and
-// roughly 10 MB — several seconds before the picker can paint anything, for
-// a page whose entire purpose is finding one team. Both are additive: a
-// caller that passes neither gets exactly what it always did.
-app.MapGet("/api/teams/all", async (HttpContext http, string? sports, string? q, int? limit, bool? refresh, SportarrApiClient sportsDbClient, ILogger<Program> logger) =>
+// Used by the Add Team page to show all teams that can be followed.
+// Search, sport, column filters, sort and limit are applied here rather than
+// in the browser (see CatalogQuery). The whole catalog is about 17,000 teams
+// and 10 MB, which the page used to download before it could show anything.
+// `sports` still chooses which sports are fetched from the metadata server;
+// `sport` filters the cached result, so changing the sport chip costs no
+// upstream request.
+app.MapGet("/api/teams/all", async (HttpContext http, string? sports, bool? refresh, SportarrApiClient sportsDbClient, ILogger<Program> logger) =>
 {
     // Parse optional sports filter (comma-separated list)
     var sportsList = !string.IsNullOrEmpty(sports)
@@ -576,45 +700,22 @@ app.MapGet("/api/teams/all", async (HttpContext http, string? sports, string? q,
     if (results == null || !results.Any())
     {
         logger.LogWarning("[TEAMS ALL] No teams found for sports: {Sports}", sportsForLog);
+        CatalogQuery.WriteCountHeaders(http.Response, 0, 0);
         return Results.Ok(new List<Team>());
     }
 
-    IEnumerable<Team> matches = results;
+    var page = CatalogQuery.FromRequest(http.Request.Query).Apply(
+        results,
+        name: t => t.Name,
+        sport: t => t.Sport,
+        searchFields: t => [t.Name, t.ShortName, t.AlternateName, t.Country],
+        columns: TeamCatalogColumns);
 
-    if (!string.IsNullOrWhiteSpace(q))
-    {
-        var term = q.Trim();
-        matches = matches.Where(team =>
-            Contains(team.Name, term) ||
-            Contains(team.ShortName, term) ||
-            Contains(team.AlternateName, term) ||
-            Contains(team.Country, term));
-    }
-
-    // Placeholder rows the catalog uses for grouping, e.g. "_No League
-    // Fighting". The client filtered these out itself, which it can no longer
-    // do once it stops receiving the whole list.
-    matches = matches.Where(team =>
-        string.IsNullOrEmpty(team.Name) || (!team.Name.StartsWith('_') && !team.Name.EndsWith('_')));
-
-    var ordered = matches.OrderBy(team => team.Name ?? string.Empty, StringComparer.OrdinalIgnoreCase).ToList();
-
-    // The caller needs the full match count to say "showing 200 of 1,340",
-    // which the truncated body can no longer tell it.
-    http.Response.Headers["X-Total-Count"] = ordered.Count.ToString();
-
-    var page = limit is > 0 ? ordered.Take(limit.Value).ToList() : ordered;
-
-    logger.LogInformation(
-        "[TEAMS ALL] {Returned} of {Matched} teams returned for sports: {Sports}{Query}",
-        page.Count, ordered.Count, sportsForLog,
-        string.IsNullOrWhiteSpace(q) ? "" : $" matching '{q}'");
-
-    return Results.Ok(page);
+    CatalogQuery.WriteCountHeaders(http.Response, page.Matched, page.Catalog);
+    logger.LogInformation("[TEAMS ALL] Returning {Returned} of {Matched} teams ({Cached} cached) for sports: {Sports}",
+        page.Rows.Count, page.Matched, results.Count, sportsForLog);
+    return Results.Ok(page.Rows);
 });
-
-static bool Contains(string? value, string term) =>
-    !string.IsNullOrEmpty(value) && value.Contains(term, StringComparison.OrdinalIgnoreCase);
 
         return app;
     }

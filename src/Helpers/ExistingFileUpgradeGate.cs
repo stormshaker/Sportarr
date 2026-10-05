@@ -34,10 +34,6 @@ public static class ExistingFileUpgradeGate
         // returns 0 for null, empty, "Unknown", or any other unparseable
         // string, so the gate below covers all three cases in one check.
         var existingQualityScoreOnly = ReleaseEvaluator.CalculateQualityScoreFromName(existingFile.Quality);
-        var existingTotalScore = existingQualityScoreOnly + existingFile.CustomFormatScore;
-        var newQualityScoreOnly = ReleaseEvaluator.CalculateQualityScoreFromName(releaseQuality);
-        var newTotalScore = newQualityScoreOnly + releaseCustomFormatScore;
-
         // REFUSE-UNKNOWN-UPGRADE GATE: Library imports whose filenames lacked a
         // quality keyword get persisted with Quality="Unknown" (or null/empty),
         // which scores 0. Every discovered release then looks like an upgrade
@@ -54,17 +50,54 @@ public static class ExistingFileUpgradeGate
             return "Upgrades are disabled for this quality profile";
         }
 
-        // A proper/repack of the SAME quality is a legitimate upgrade: the
-        // original was broken and re-released fixed. Gated on the Download
-        // Propers and Repacks setting.
-        var revisionUpgrade = config.DownloadPropersAndRepacks == "preferAndUpgrade" &&
-            newTotalScore == existingTotalScore &&
-            ReleaseRevision.Parse(releaseTitle) >
-            ReleaseRevision.Parse(existingFile.OriginalTitle ?? existingFile.Quality);
-
-        if (newTotalScore <= existingTotalScore && !revisionUpgrade)
+        // Profile rank comes first. A lower rank is never an upgrade.
+        // Revision and custom format score decide between equal ranks.
+        var qualityComparison = QualityProfileRanker.Compare(profile, releaseQuality, existingFile.Quality);
+        if (qualityComparison < 0)
         {
-            return $"Existing file has same or better score ({existingTotalScore})";
+            return $"Existing file is of higher quality ({existingFile.Quality})";
+        }
+        var sameQuality = qualityComparison == 0;
+
+        // A proper or repack at the same rank can replace a broken release.
+        var existingRevision = ReleaseRevision.Parse(existingFile.OriginalTitle ?? existingFile.Quality);
+        var releaseRevision = ReleaseRevision.Parse(releaseTitle);
+        var revisionUpgrade = sameQuality &&
+            config.DownloadPropersAndRepacks == "preferAndUpgrade" &&
+            releaseRevision > existingRevision;
+
+        // Refuse an older revision at the same rank when propers are preferred.
+        if (sameQuality && config.DownloadPropersAndRepacks != "doNotPrefer" && releaseRevision < existingRevision)
+        {
+            return $"Existing file is a newer revision ({existingFile.OriginalTitle ?? existingFile.Quality})";
+        }
+
+        var qualityCutoffMet = false;
+        var formatCutoffMet = false;
+        if (profile?.CutoffQuality != null)
+        {
+            var cutoffRank = QualityProfileRanker.GetCutoffRank(profile, profile.CutoffQuality.Value);
+            qualityCutoffMet = cutoffRank > 0
+                && QualityProfileRanker.GetRank(profile, existingFile.Quality) >= cutoffRank;
+        }
+        if (profile?.CutoffFormatScore != null)
+        {
+            formatCutoffMet = existingFile.CustomFormatScore >= profile.CutoffFormatScore.Value;
+        }
+
+        if (!revisionUpgrade && qualityCutoffMet
+            && (formatCutoffMet || profile?.CutoffFormatScore == null))
+        {
+            return "Existing file meets the quality profile cutoff";
+        }
+
+        var qualityImprovementAllowed = qualityComparison > 0 && !qualityCutoffMet;
+
+        if (!qualityImprovementAllowed
+            && releaseCustomFormatScore <= existingFile.CustomFormatScore
+            && !revisionUpgrade)
+        {
+            return $"Existing file has same or better custom format score ({existingFile.CustomFormatScore} vs {releaseCustomFormatScore})";
         }
 
         // COSMETIC-DUPLICATE GUARD: broadcasters repost the identical release
@@ -72,7 +105,7 @@ public static class ExistingFileUpgradeGate
         // from the existing file's original title are broadcaster words, it
         // is the same content; only a proper/repack revision justifies
         // replacing it.
-        if (!revisionUpgrade &&
+        if (sameQuality && !revisionUpgrade &&
             RssSyncService.TitlesDifferOnlyByBroadcasterBranding(existingFile.OriginalTitle, releaseTitle))
         {
             return "Same release as the existing file (title differs only by broadcaster branding)";
@@ -87,9 +120,8 @@ public static class ExistingFileUpgradeGate
         // with the default increment of one no proper was ever grabbed.
         if (profile != null && !revisionUpgrade)
         {
-            var isQualityUpgrade = newQualityScoreOnly > existingQualityScoreOnly;
             var formatGain = releaseCustomFormatScore - existingFile.CustomFormatScore;
-            if (!isQualityUpgrade && formatGain < profile.FormatScoreIncrement)
+            if (!qualityImprovementAllowed && formatGain < profile.FormatScoreIncrement)
             {
                 return $"Custom-format gain {formatGain} below minimum score increment {profile.FormatScoreIncrement}";
             }

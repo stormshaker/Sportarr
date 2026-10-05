@@ -19,7 +19,7 @@ import apiClient from '../../api/client';
 import { apiGet } from '../../utils/api';
 import type { QualityProfile } from '../../types';
 import SettingsHeader from '../../components/SettingsHeader';
-import { errorMessage } from '../../utils/errors';
+import IptvSettingsNav from '../../components/IptvSettingsNav';
 
 // Naming preset types (same as MediaManagementSettings)
 interface NamingPreset {
@@ -58,6 +58,8 @@ interface DvrSettings {
   postRecordingCommand: string;
   overtimeGuardEnabled: boolean;
   overtimeMaxExtensionMinutes: number;
+  earlyFinishGuardEnabled: boolean;
+  earlyFinishBufferMinutes: number;
   reresolveChannelsEnabled: boolean;
   reresolveLockMinutes: number;
   reresolveMinImprovement: number;
@@ -173,6 +175,8 @@ const defaultDvrSettings: DvrSettings = {
   postRecordingCommand: '',
   overtimeGuardEnabled: true,
   overtimeMaxExtensionMinutes: 120,
+  earlyFinishGuardEnabled: false,
+  earlyFinishBufferMinutes: 5,
   reresolveChannelsEnabled: true,
   reresolveLockMinutes: 45,
   reresolveMinImprovement: 10,
@@ -210,11 +214,8 @@ function encodingSettingsFrom(data: DvrSettings) {
   };
 }
 
-// The encoding block of the DVR settings, inferred from the state that holds
-// it so the two cannot drift.
-type EncodingSettings = ReturnType<typeof encodingSettingsFrom>;
-
 export default function DvrSettingsPage() {
+  const [showAdvanced, setShowAdvanced] = useState(false);
   // State
   // FFmpeg state
   const [ffmpegAvailable, setFfmpegAvailable] = useState<boolean | null>(null);
@@ -293,7 +294,7 @@ export default function DvrSettingsPage() {
       // regardless of reality.
       const { data } = await apiClient.get<{ available: boolean; version?: string; path?: string }>('/dvr/ffmpeg/status');
       setFfmpegAvailable(data.available);
-    } catch {
+    } catch (err: any) {
       setFfmpegAvailable(false);
     }
   };
@@ -315,7 +316,7 @@ export default function DvrSettingsPage() {
       if (data.videoBitrate > 0) {
         setGbPerHour(kbpsToGbPerHour(data.videoBitrate));
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to load DVR settings:', err);
     }
   };
@@ -330,7 +331,7 @@ export default function DvrSettingsPage() {
         const defaultProfile = data.find(p => p.isDefault) || data[0];
         setSelectedQualityProfileId(defaultProfile.id);
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to load user quality profiles:', err);
     }
   };
@@ -339,7 +340,7 @@ export default function DvrSettingsPage() {
     try {
       const { data } = await apiClient.get<HardwareAccelerationInfo[]>('/dvr/hardware-acceleration');
       setAvailableHwAccel(data);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to load hardware acceleration info:', err);
     }
   };
@@ -382,7 +383,7 @@ export default function DvrSettingsPage() {
 
 
   // Handle encoding setting change (for inline settings)
-  const handleEncodingSettingChange = <K extends keyof EncodingSettings>(field: K, value: EncodingSettings[K]) => {
+  const handleEncodingSettingChange = (field: string, value: any) => {
     const updated = { ...currentEncodingSettings, [field]: value };
     setCurrentEncodingSettings(updated);
     // Also update dvrSettings so it gets saved
@@ -438,7 +439,7 @@ export default function DvrSettingsPage() {
         profileData
       );
       setScorePreview(data);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to load score preview:', err);
       setScorePreview(null);
     } finally {
@@ -446,7 +447,7 @@ export default function DvrSettingsPage() {
     }
   };
 
-  const handleSettingsChange = <K extends keyof DvrSettings>(field: K, value: DvrSettings[K]) => {
+  const handleSettingsChange = (field: keyof DvrSettings, value: any) => {
     setDvrSettings(prev => ({ ...prev, [field]: value }));
   };
 
@@ -458,17 +459,15 @@ export default function DvrSettingsPage() {
     try {
       setIsSavingSettings(true);
       await apiClient.put('/dvr/settings', payload);
-      // The server clamps these two on save. Mirroring the clamps here keeps
-      // the page from claiming a value the recorder does not use, without
-      // reloading the whole form over an in-flight edit.
+      // Keep saved values consistent with the recorder.
       const clamped = {
         ...payload,
         reconnectDelaySeconds: Math.min(300, Math.max(5, payload.reconnectDelaySeconds)),
         readTimeoutSeconds: Math.min(120, Math.max(0, payload.readTimeoutSeconds)),
+        earlyFinishBufferMinutes: Math.min(60, Math.max(0, payload.earlyFinishBufferMinutes)),
       };
       setOriginalSettings(clamped);
-      // An edit made to either field while the save was in flight wins
-      // over the clamp of the older submitted value.
+      // Preserve edits made during the save request.
       setDvrSettings((current) => ({
         ...current,
         reconnectDelaySeconds: current.reconnectDelaySeconds === payload.reconnectDelaySeconds
@@ -477,6 +476,9 @@ export default function DvrSettingsPage() {
         readTimeoutSeconds: current.readTimeoutSeconds === payload.readTimeoutSeconds
           ? clamped.readTimeoutSeconds
           : current.readTimeoutSeconds,
+        earlyFinishBufferMinutes: current.earlyFinishBufferMinutes === payload.earlyFinishBufferMinutes
+          ? clamped.earlyFinishBufferMinutes
+          : current.earlyFinishBufferMinutes,
       }));
       toast.success('DVR Settings Saved', { description: 'Your DVR settings have been saved' });
 
@@ -489,8 +491,8 @@ export default function DvrSettingsPage() {
       } catch {
         setEffectivePath(null);
       }
-    } catch (err) {
-      toast.error('Failed to save settings', { description: errorMessage(err) });
+    } catch (err: any) {
+      toast.error('Failed to save settings', { description: err.message });
     } finally {
       setIsSavingSettings(false);
     }
@@ -513,8 +515,8 @@ export default function DvrSettingsPage() {
   return (
     <div className="pb-8">
       <SettingsHeader
-        title="DVR Settings"
-        subtitle="Recording quality, hardware acceleration, storage, padding, and catchup options"
+        title="IPTV Options"
+        subtitle="Choose how Sportarr records and stores live events"
         onSave={handleSaveSettings}
         isSaving={isSavingSettings}
         hasUnsavedChanges={settingsHasChanges}
@@ -535,17 +537,28 @@ export default function DvrSettingsPage() {
           <VideoCameraIcon className="h-5 w-5 text-gray-400" />
           Recordings
         </Link>
+        <button
+          onClick={() => setShowAdvanced((current) => !current)}
+          className={`inline-flex items-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium transition-colors ${
+            showAdvanced
+              ? 'border-red-700 bg-red-950/30 text-white'
+              : 'border-gray-700 bg-gray-800 text-gray-200 hover:bg-gray-700'
+          }`}
+        >
+          {showAdvanced ? 'Hide advanced' : 'Advanced'}
+        </button>
       </SettingsHeader>
 
-      <div className="max-w-6xl mx-auto px-6">
+      <div className="mx-auto max-w-6xl px-4 sm:px-6">
+      <IptvSettingsNav />
 
       {/* FFmpeg Warning */}
       {ffmpegAvailable === false && (
         <div className="mb-6 bg-yellow-950/30 border border-yellow-900/50 rounded-lg p-4 flex items-start">
           <ExclamationTriangleIcon className="w-6 h-6 text-yellow-400 mr-3 flex-shrink-0 mt-0.5" />
-          <div className="flex-1">
+          <div className="min-w-0 flex-1">
             <h3 className="text-lg font-semibold text-yellow-400 mb-1">FFmpeg Not Found</h3>
-            <p className="text-sm text-gray-300">
+            <p className="break-words text-sm text-gray-300">
               FFmpeg is required for DVR recordings. Please install FFmpeg and ensure it's available in your system PATH.
             </p>
           </div>
@@ -555,7 +568,7 @@ export default function DvrSettingsPage() {
       <div className="mb-8 bg-gradient-to-br from-gray-900 to-black border border-red-900/30 rounded-lg overflow-hidden">
         <div className="p-6">
               {/* Recording Quality & Encoding Settings */}
-              <div className="mb-8">
+              <div className={showAdvanced ? 'mb-8' : 'hidden'}>
                 <h4 className="text-lg font-semibold text-white mb-4 flex items-center">
                   <FilmIcon className="w-5 h-5 mr-2 text-purple-400" />
                   Recording Quality & Encoding
@@ -862,7 +875,7 @@ export default function DvrSettingsPage() {
               </div>
 
               {/* Hardware Acceleration */}
-              <div className="mb-8">
+              <div className={showAdvanced ? 'mb-8' : 'hidden'}>
                 <h4 className="text-lg font-semibold text-white mb-4 flex items-center">
                   <CpuChipIcon className="w-5 h-5 mr-2 text-blue-400" />
                   Hardware Acceleration
@@ -967,6 +980,49 @@ export default function DvrSettingsPage() {
                         className="w-full px-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-red-600"
                       />
                       <p className="text-xs text-gray-500 mt-1">Ceiling on total extension per recording</p>
+                    </div>
+                  )}
+                  <div className="md:col-span-2">
+                    <label className="flex items-start space-x-3 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={dvrSettings.earlyFinishGuardEnabled}
+                        onChange={(e) => handleSettingsChange('earlyFinishGuardEnabled', e.target.checked)}
+                        className="mt-1 w-5 h-5 rounded border-gray-700 bg-gray-800 text-red-600 focus:ring-red-600"
+                      />
+                      <div>
+                        <span className="text-white font-medium">Early Finish Guard</span>
+                        <p className="text-sm text-gray-400 mt-1">
+                          Stop event-linked LIVE recordings early when fresh event status confirms a final result twice,
+                          at least one minute apart. Missing or inconclusive data keeps the normal schedule.
+                          Event status does not confirm what the channel is showing.
+                        </p>
+                      </div>
+                    </label>
+                  </div>
+                  {dvrSettings.earlyFinishGuardEnabled && (
+                    <div>
+                      <label htmlFor="early-finish-buffer" className="block text-sm font-medium text-gray-300 mb-2">
+                        Post-Event Buffer (Minutes)
+                      </label>
+                      <input
+                        id="early-finish-buffer"
+                        type="number"
+                        inputMode="numeric"
+                        min={0}
+                        max={60}
+                        step={1}
+                        value={dvrSettings.earlyFinishBufferMinutes}
+                        onChange={(e) => {
+                          const value = e.target.valueAsNumber;
+                          handleSettingsChange('earlyFinishBufferMinutes', Number.isNaN(value) ? 0 : Math.min(60, Math.max(0, Math.trunc(value))));
+                        }}
+                        aria-describedby="early-finish-buffer-help"
+                        className="w-full rounded-lg border border-gray-700 bg-gray-800 px-4 py-2 text-white focus:border-red-600 focus:outline-none focus:ring-1 focus:ring-red-500"
+                      />
+                      <p id="early-finish-buffer-help" className="text-xs text-gray-500 mt-1">
+                        Time to keep recording after the first final confirmation. Zero still requires a second fresh confirmation.
+                      </p>
                     </div>
                   )}
                   <div className="md:col-span-2">
@@ -1083,7 +1139,7 @@ export default function DvrSettingsPage() {
                 </div>
 
                 {/* Trusted networks for LAN stream sources */}
-                <div className="mb-6">
+                <div className={showAdvanced ? 'mb-6' : 'hidden'}>
                   <label className="block text-sm font-medium text-gray-300 mb-2">Trusted Stream Networks</label>
                   <input
                     type="text"
@@ -1103,7 +1159,7 @@ export default function DvrSettingsPage() {
                 </div>
 
                 {/* File Naming - Enhanced with TRaSH presets */}
-                <div className="p-4 bg-gray-800/50 rounded-lg border border-gray-700">
+                <div className={showAdvanced ? 'rounded-lg border border-gray-700 bg-gray-800/50 p-4' : 'hidden'}>
                   <div className="flex items-center justify-between mb-3">
                     <label className="flex items-center gap-2 text-sm font-medium text-white">
                       <DocumentTextIcon className="w-5 h-5 text-purple-400" />
@@ -1210,7 +1266,7 @@ export default function DvrSettingsPage() {
                   <ClockIcon className="w-5 h-5 mr-2 text-green-400" />
                   Recording Padding
                 </h4>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   <div>
                     <label className="block text-sm font-medium text-gray-300 mb-2">Pre-Padding (minutes)</label>
                     <input
@@ -1235,13 +1291,6 @@ export default function DvrSettingsPage() {
                     />
                     <p className="text-xs text-gray-500 mt-1">Continue recording after scheduled end (for overtime)</p>
                   </div>
-                </div>
-              </div>
-
-              {/* Advanced Settings */}
-              <div className="mb-8">
-                <h4 className="text-lg font-semibold text-white mb-4">Advanced Settings</h4>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   <div>
                     <label className="block text-sm font-medium text-gray-300 mb-2">Max Concurrent Recordings</label>
                     <input
@@ -1251,8 +1300,15 @@ export default function DvrSettingsPage() {
                       min="0"
                       className="w-full px-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-red-600"
                     />
-                    <p className="text-xs text-gray-500 mt-1">0 = unlimited</p>
+                    <p className="text-xs text-gray-500 mt-1">0 uses every available provider slot</p>
                   </div>
+                </div>
+              </div>
+
+              {/* Advanced Settings */}
+              <div className={showAdvanced ? 'mb-8' : 'hidden'}>
+                <h4 className="text-lg font-semibold text-white mb-4">Advanced Settings</h4>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   <div>
                     <label className="block text-sm font-medium text-gray-300 mb-2">Channels per Event</label>
                     <input
@@ -1323,7 +1379,7 @@ export default function DvrSettingsPage() {
               </div>
 
               {/* Reconnection Settings */}
-              <div className="mb-6">
+              <div className={showAdvanced ? 'mb-6' : 'hidden'}>
                 <h4 className="text-lg font-semibold text-white mb-4">Stream Reconnection</h4>
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                   <div className="flex items-center">
@@ -1387,7 +1443,7 @@ export default function DvrSettingsPage() {
               </div>
 
               {/* Catchup Settings */}
-              <div className="mb-6">
+              <div className={showAdvanced ? 'mb-6' : 'hidden'}>
                 <h4 className="text-lg font-semibold text-white mb-1">Catchup Recording</h4>
                 <p className="text-xs text-gray-500 mb-4">
                   When a channel's provider keeps a catchup archive, finished events are downloaded

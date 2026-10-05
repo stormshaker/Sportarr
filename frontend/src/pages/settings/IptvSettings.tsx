@@ -1,4 +1,6 @@
 import { Suspense, lazy, useState, useMemo, useEffect, useRef } from 'react';
+import { Menu } from '@headlessui/react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
   PlusIcon,
   PencilIcon,
@@ -13,6 +15,8 @@ import {
   BoltIcon,
   ClipboardDocumentIcon,
   LinkIcon,
+  EllipsisVerticalIcon,
+  WrenchScrewdriverIcon,
 } from '@heroicons/react/24/outline';
 import { toast } from 'sonner';
 import apiClient from '../../api/client';
@@ -20,8 +24,9 @@ import { runSettingsSave } from '../../hooks/useSettings';
 import PageHeader from '../../components/PageHeader';
 import PageShell from '../../components/PageShell';
 import EpgSourcesPanel from '../../components/EpgSourcesPanel';
-import { errorMessage } from '../../utils/errors';
-import type { AxiosResponse } from 'axios';
+import IptvSettingsNav from '../../components/IptvSettingsNav';
+import DisclosureSection from '../../components/DisclosureSection';
+import { BUTTON_PRIMARY } from '../../utils/designTokens';
 
 // IPTV Source Types
 type IptvSourceType = 'M3U' | 'Xtream';
@@ -123,7 +128,7 @@ function SubscriptionUrlsSection() {
     try {
       await navigator.clipboard.writeText(text);
       toast.success(`${label} copied to clipboard`);
-    } catch {
+    } catch (error) {
       toast.error('Failed to copy to clipboard');
     }
   };
@@ -280,6 +285,9 @@ function StreamPlayerLoading() {
 
 
 export default function IptvSettings() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const isAdvancedPage = location.pathname.endsWith('/advanced');
   // State
   const [sources, setSources] = useState<IptvSource[]>([]);
   // Ids of playlist sources that have a linked guide (EPG source), so each
@@ -288,11 +296,12 @@ export default function IptvSettings() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Automatic refresh intervals (hours; 0 = disabled). Stored in the global
-  // settings and consumed by the background refresh service.
+  // Playlist and guide limits stored in the global settings.
   const [iptvRefreshHours, setIptvRefreshHours] = useState(168);
   const [epgRefreshHours, setEpgRefreshHours] = useState(48);
-  const [savingRefresh, setSavingRefresh] = useState(false);
+  const [epgMaxDownloadSizeMb, setEpgMaxDownloadSizeMb] = useState('256');
+  const [iptvSettingsLoadState, setIptvSettingsLoadState] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [savingIptvSettings, setSavingIptvSettings] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -300,14 +309,23 @@ export default function IptvSettings() {
         const { data } = await apiClient.get('/settings');
         if (typeof data.iptvPlaylistRefreshHours === 'number') setIptvRefreshHours(data.iptvPlaylistRefreshHours);
         if (typeof data.epgRefreshHours === 'number') setEpgRefreshHours(data.epgRefreshHours);
+        if (typeof data.epgMaxDownloadSizeMb === 'number') setEpgMaxDownloadSizeMb(String(data.epgMaxDownloadSizeMb));
+        setIptvSettingsLoadState('ready');
       } catch {
-        // Non-fatal: the card just shows defaults.
+        setIptvSettingsLoadState('error');
       }
     })();
   }, []);
 
-  const saveRefreshIntervals = async () => {
-    setSavingRefresh(true);
+  const saveIptvSettings = async () => {
+    if (iptvSettingsLoadState !== 'ready') return;
+
+    setSavingIptvSettings(true);
+    const requestedLimit = Number(epgMaxDownloadSizeMb);
+    const normalizedLimit = Number.isFinite(requestedLimit)
+      ? Math.min(512, Math.max(1, Math.trunc(requestedLimit)))
+      : 256;
+    setEpgMaxDownloadSizeMb(String(normalizedLimit));
     try {
       // PUT expects the full settings object, so merge onto the current one,
       // inside the shared chain so a save from another settings page cannot
@@ -318,12 +336,13 @@ export default function IptvSettings() {
           ...current,
           iptvPlaylistRefreshHours: Math.max(0, iptvRefreshHours),
           epgRefreshHours: Math.max(0, epgRefreshHours),
+          epgMaxDownloadSizeMb: normalizedLimit,
         });
       });
     } catch {
-      setError('Failed to save refresh intervals');
+      setError('Failed to save IPTV settings');
     } finally {
-      setSavingRefresh(false);
+      setSavingIptvSettings(false);
     }
   };
 
@@ -333,6 +352,7 @@ export default function IptvSettings() {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<number | null>(null);
   // Multi-select for bulk source deletion (e.g. clearing accidental duplicates).
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [manageProviders, setManageProviders] = useState(false);
   const [isBulkDeleting, setIsBulkDeleting] = useState(false);
   const [formData, setFormData] = useState<SourceFormData>(defaultFormData);
   // Bumped after the add flow creates an EPG source, to force the EPG Sources
@@ -383,8 +403,8 @@ export default function IptvSettings() {
       setIsLoading(true);
       const { data } = await apiClient.get<IptvSource[]>('/iptv/sources');
       setSources(data);
-    } catch (err) {
-      setError(errorMessage(err) || 'Failed to load IPTV sources');
+    } catch (err: any) {
+      setError(err.message || 'Failed to load IPTV sources');
     } finally {
       setIsLoading(false);
     }
@@ -420,7 +440,7 @@ export default function IptvSettings() {
       const offset = page * CHANNEL_PAGE_SIZE;
 
       // Only load stats and groups on first page
-      const requests: Promise<AxiosResponse<unknown>>[] = [
+      const requests: Promise<any>[] = [
         apiClient.get<IptvChannel[]>(`/iptv/sources/${sourceId}/channels`, {
           params: {
             sportsOnly: channelFilter === 'sports' ? true : undefined,
@@ -441,9 +461,7 @@ export default function IptvSettings() {
 
       const results = await Promise.all(requests);
       if (seq !== channelLoadSeq.current) return;
-      // Positions are fixed by how the array is built above: [0] is always the
-      // channel page, and [1]/[2] are the stats and groups added for page 0.
-      const channelsData = (Array.isArray(results[0].data) ? results[0].data : []) as IptvChannel[];
+      const channelsData = Array.isArray(results[0].data) ? results[0].data : [];
 
       if (reset) {
         setChannels(channelsData);
@@ -455,18 +473,18 @@ export default function IptvSettings() {
       setHasMoreChannels(channelsData.length === CHANNEL_PAGE_SIZE);
 
       if (page === 0 && results.length > 1) {
-        setChannelStats(results[1].data as ChannelStats);
-        setGroups(Array.isArray(results[2].data) ? (results[2].data as string[]) : []);
+        setChannelStats(results[1].data);
+        setGroups(Array.isArray(results[2].data) ? results[2].data : []);
       }
-    } catch (err) {
+    } catch (err: any) {
       if (seq !== channelLoadSeq.current) return;
-      toast.error('Failed to load channels', { description: errorMessage(err) });
+      toast.error('Failed to load channels', { description: err.message });
     } finally {
       if (seq === channelLoadSeq.current) setLoadingChannels(false);
     }
   };
 
-  const handleFormChange = <K extends keyof SourceFormData>(field: K, value: SourceFormData[K]) => {
+  const handleFormChange = (field: keyof SourceFormData, value: any) => {
     setFormData(prev => ({ ...prev, [field]: value }));
   };
 
@@ -515,9 +533,9 @@ export default function IptvSettings() {
             iptvSourceId: response.data.id,
           });
           setEpgRefreshKey(k => k + 1);
-        } catch (epgErr) {
+        } catch (epgErr: any) {
           // The playlist source is already created; don't fail the whole add over the guide.
-          const epgMsg = errorMessage(epgErr, 'Unknown error');
+          const epgMsg = epgErr?.response?.data?.error || epgErr?.message || 'Unknown error';
           toast.warning('Playlist added, but the guide source failed', { description: epgMsg });
         }
       }
@@ -526,10 +544,10 @@ export default function IptvSettings() {
       toast.success('Source Added', {
         description: `${formData.name} was added; channels are syncing in the background${guideUrl ? ' and its guide is being fetched' : ''}`,
       });
-    } catch (err) {
+    } catch (err: any) {
       // Surface the server's actual error (e.g. the real Xtream failure reason,
       // or a duplicate-source message) instead of axios's generic status text.
-      const msg = errorMessage(err, 'Failed to add source');
+      const msg = err?.response?.data?.error || err.message || 'Failed to add source';
       setError(msg);
       toast.error('Failed to add source', { description: msg });
     } finally {
@@ -561,8 +579,8 @@ export default function IptvSettings() {
       setEditingSource(null);
       setFormData(defaultFormData);
       toast.success('Source Updated', { description: `${formData.name} has been updated` });
-    } catch (err) {
-      const msg = errorMessage(err, 'Failed to update source');
+    } catch (err: any) {
+      const msg = err?.response?.data?.error || err.message || 'Failed to update source';
       setError(msg);
       toast.error('Failed to update source', { description: msg });
     } finally {
@@ -577,9 +595,9 @@ export default function IptvSettings() {
       setSources(prev => prev.filter(s => s.id !== id));
       setShowDeleteConfirm(null);
       toast.success('Source Deleted');
-    } catch (err) {
-      setError(errorMessage(err) || 'Failed to delete source');
-      toast.error('Failed to delete source', { description: errorMessage(err) });
+    } catch (err: any) {
+      setError(err.message || 'Failed to delete source');
+      toast.error('Failed to delete source', { description: err.message });
     }
   };
 
@@ -601,8 +619,8 @@ export default function IptvSettings() {
       setSources(prev => prev.filter(s => !selectedIds.has(s.id)));
       setSelectedIds(new Set());
       toast.success(`Deleted ${ids.length} source${ids.length === 1 ? '' : 's'}`);
-    } catch (err) {
-      const msg = errorMessage(err, 'Failed to delete sources');
+    } catch (err: any) {
+      const msg = err?.response?.data?.error || err.message || 'Failed to delete sources';
       setError(msg);
       toast.error('Failed to delete sources', { description: msg });
     } finally {
@@ -615,8 +633,8 @@ export default function IptvSettings() {
       const response = await apiClient.post<IptvSource>(`/iptv/sources/${source.id}/toggle`);
       setSources(prev => prev.map(s => s.id === source.id ? response.data : s));
       toast.success(response.data.isActive ? 'Source Enabled' : 'Source Disabled');
-    } catch (err) {
-      toast.error('Failed to toggle source', { description: errorMessage(err) });
+    } catch (err: any) {
+      toast.error('Failed to toggle source', { description: err.message });
     }
   };
 
@@ -646,8 +664,8 @@ export default function IptvSettings() {
       } else {
         toast.success('Everything synced', { description: summary });
       }
-    } catch (err) {
-      toast.error('Sync failed', { description: errorMessage(err) });
+    } catch (err: any) {
+      toast.error('Sync failed', { description: err.message });
     } finally {
       setIsSyncingAll(false);
     }
@@ -659,8 +677,8 @@ export default function IptvSettings() {
       const response = await apiClient.post<{ channelCount: number }>(`/iptv/sources/${sourceId}/sync`);
       await loadSources();
       toast.success('Channels Synced', { description: `Synced ${response.data.channelCount} channels` });
-    } catch (err) {
-      toast.error('Failed to sync channels', { description: errorMessage(err) });
+    } catch (err: any) {
+      toast.error('Failed to sync channels', { description: err.message });
     } finally {
       setSyncingSourceId(null);
     }
@@ -692,9 +710,9 @@ export default function IptvSettings() {
         setTestResult({ success: false, message: response.data.error || 'Connection failed' });
         toast.error('Test Failed', { description: response.data.error });
       }
-    } catch (err) {
-      setTestResult({ success: false, message: errorMessage(err) || 'Connection test failed' });
-      toast.error('Test Failed', { description: errorMessage(err) });
+    } catch (err: any) {
+      setTestResult({ success: false, message: err.message || 'Connection test failed' });
+      toast.error('Test Failed', { description: err.message });
     } finally {
       setIsTesting(false);
     }
@@ -720,8 +738,8 @@ export default function IptvSettings() {
       } else {
         toast.error('Channel Offline', { description: response.data.error });
       }
-    } catch (err) {
-      toast.error('Failed to test channel', { description: errorMessage(err) });
+    } catch (err: any) {
+      toast.error('Failed to test channel', { description: err.message });
     } finally {
       setTestingChannelId(null);
     }
@@ -840,7 +858,7 @@ export default function IptvSettings() {
                   type="password"
                   value={formData.password}
                   onChange={(e) => handleFormChange('password', e.target.value)}
-                  onFocus={() => {
+                  onFocus={(e) => {
                     // Clear the placeholder when user focuses the field to type a new password
                     if (formData.password === EXISTING_PASSWORD_PLACEHOLDER) {
                       handleFormChange('password', '');
@@ -965,20 +983,44 @@ export default function IptvSettings() {
   return (
     <PageShell className="pb-8">
       <PageHeader
-        title="IPTV Sources"
-        subtitle="Configure IPTV sources for DVR recording of sports events"
+        title="IPTV Options"
+        subtitle={isAdvancedPage
+          ? 'Manual guide, refresh, export, and maintenance controls'
+          : 'Connect providers and let Sportarr keep channels and guide data current'}
         actions={
-          <button
-            onClick={handleSyncNow}
-            disabled={isSyncingAll}
-            className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700 disabled:opacity-50"
-            title="Sync all sources, refresh the guide, and re-run auto-mapping in one pass"
-          >
-            <ArrowPathIcon className={`h-5 w-5 ${isSyncingAll ? 'animate-spin' : ''}`} />
-            {isSyncingAll ? 'Syncing…' : 'Sync Now'}
-          </button>
+          isAdvancedPage ? (
+            <button
+              onClick={handleSyncNow}
+              disabled={isSyncingAll}
+              className={BUTTON_PRIMARY}
+              title="Sync all providers, refresh the guide, and re-run automatic mapping"
+            >
+              <ArrowPathIcon className={`h-5 w-5 ${isSyncingAll ? 'animate-spin' : ''}`} />
+              {isSyncingAll ? 'Syncing…' : 'Sync now'}
+            </button>
+          ) : (
+            <>
+              <button
+                onClick={() => {
+                  setManageProviders((current) => {
+                    if (current) setSelectedIds(new Set());
+                    return !current;
+                  });
+                }}
+                className="inline-flex min-h-11 items-center gap-2 rounded-lg border border-gray-700 bg-gray-800 px-4 py-2 text-sm font-medium text-gray-200 transition-colors hover:bg-gray-700"
+              >
+                <WrenchScrewdriverIcon className="h-5 w-5 text-gray-400" />
+                {manageProviders ? 'Done' : 'Manage providers'}
+              </button>
+              <button onClick={() => setShowAddModal(true)} className={BUTTON_PRIMARY}>
+                <PlusIcon className="h-5 w-5" />
+                Add provider
+              </button>
+            </>
+          )
         }
       />
+      <IptvSettingsNav />
 
       {/* Error Alert */}
       {error && (
@@ -997,18 +1039,15 @@ export default function IptvSettings() {
         </div>
       )}
 
-
+        {!isAdvancedPage && (
+        <>
         {/* Sources List */}
         <div className="mb-8 bg-gradient-to-br from-gray-900 to-black border border-red-900/30 rounded-lg p-6">
           <div className="flex items-center justify-between mb-6">
-            <h3 className="text-xl font-semibold text-white">Your IPTV Sources</h3>
-            <button
-              onClick={() => setShowAddModal(true)}
-              className="flex items-center px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors"
-            >
-              <PlusIcon className="w-4 h-4 mr-2" />
-              Add Source
-            </button>
+            <div>
+              <h3 className="text-xl font-semibold text-white">Providers</h3>
+              <p className="mt-1 text-sm text-gray-400">Sportarr refreshes providers and maps sports channels automatically.</p>
+            </div>
           </div>
 
           {selectedIds.size > 0 && (
@@ -1040,13 +1079,15 @@ export default function IptvSettings() {
               >
                 <div className="flex flex-wrap items-start justify-between gap-y-2">
                   <div className="flex items-start space-x-4 flex-1">
-                    <input
-                      type="checkbox"
-                      checked={selectedIds.has(source.id)}
-                      onChange={() => toggleSelected(source.id)}
-                      className="mt-1.5 h-4 w-4 flex-shrink-0 accent-red-600 cursor-pointer"
-                      title="Select for bulk delete"
-                    />
+                    {manageProviders && (
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.has(source.id)}
+                        onChange={() => toggleSelected(source.id)}
+                        className="mt-1.5 h-4 w-4 flex-shrink-0 accent-red-600 cursor-pointer"
+                        title="Select for bulk delete"
+                      />
+                    )}
                     {/* Status Icon */}
                     <div className="mt-1">
                       {source.isActive ? (
@@ -1081,10 +1122,6 @@ export default function IptvSettings() {
                       </div>
 
                       <div className="space-y-1 text-sm text-gray-400">
-                        <p>
-                          <span className="text-gray-500">URL:</span>{' '}
-                          <span className="text-white truncate">{source.url}</span>
-                        </p>
                         {source.lastUpdated && (
                           <p>
                             <span className="text-gray-500">Last Synced:</span>{' '}
@@ -1103,49 +1140,50 @@ export default function IptvSettings() {
                   </div>
 
                   {/* Actions */}
-                  <div className="flex items-center space-x-2 ml-auto">
+                  <div className="ml-auto flex items-center gap-2">
                     <button
-                      onClick={() => handleViewChannels(source)}
-                      className="p-2 text-gray-400 hover:text-white hover:bg-gray-800 rounded transition-colors"
-                      title="View Channels"
+                      onClick={() => navigate('/iptv/channels')}
+                      className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-gray-800 px-3 py-2 text-sm font-medium text-gray-200 transition-colors hover:bg-gray-700"
                     >
-                      <ListBulletIcon className="w-5 h-5" />
+                      <ListBulletIcon className="h-4 w-4" />
+                      Channels
                     </button>
-                    <button
-                      onClick={() => handleSyncChannels(source.id)}
-                      disabled={syncingSourceId === source.id}
-                      className={`p-2 text-gray-400 hover:text-white hover:bg-gray-800 rounded transition-colors ${
-                        syncingSourceId === source.id ? 'animate-spin' : ''
-                      }`}
-                      title="Sync Channels"
-                    >
-                      <ArrowPathIcon className="w-5 h-5" />
-                    </button>
-                    <button
-                      onClick={() => handleToggleActive(source)}
-                      className="p-2 text-gray-400 hover:text-white hover:bg-gray-800 rounded transition-colors"
-                      title={source.isActive ? 'Disable' : 'Enable'}
-                    >
-                      {source.isActive ? (
-                        <CheckCircleIcon className="w-5 h-5 text-green-400" />
-                      ) : (
-                        <XCircleIcon className="w-5 h-5" />
-                      )}
-                    </button>
-                    <button
-                      onClick={() => handleEditSource(source)}
-                      className="p-2 text-gray-400 hover:text-white hover:bg-gray-800 rounded transition-colors"
-                      title="Edit"
-                    >
-                      <PencilIcon className="w-5 h-5" />
-                    </button>
-                    <button
-                      onClick={() => setShowDeleteConfirm(source.id)}
-                      className="p-2 text-gray-400 hover:text-red-400 hover:bg-red-950/30 rounded transition-colors"
-                      title="Delete"
-                    >
-                      <TrashIcon className="w-5 h-5" />
-                    </button>
+                    <Menu as="div" className="relative">
+                      <Menu.Button
+                        className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg text-gray-400 transition-colors hover:bg-gray-800 hover:text-white"
+                        aria-label={`More actions for ${source.name}`}
+                      >
+                        <EllipsisVerticalIcon className="h-5 w-5" />
+                      </Menu.Button>
+                      <Menu.Items className="absolute right-0 z-30 mt-1 w-52 overflow-hidden rounded-lg border border-gray-700 bg-gray-900 py-1 shadow-xl shadow-black/50 focus:outline-none">
+                        <Menu.Item>{({ active }) => (
+                          <button onClick={() => handleViewChannels(source)} className={`flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm text-gray-200 ${active ? 'bg-gray-800' : ''}`}>
+                            <ListBulletIcon className="h-4 w-4" /> Preview channels
+                          </button>
+                        )}</Menu.Item>
+                        <Menu.Item>{({ active }) => (
+                          <button onClick={() => handleSyncChannels(source.id)} disabled={syncingSourceId === source.id} className={`flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm text-gray-200 disabled:opacity-50 ${active ? 'bg-gray-800' : ''}`}>
+                            <ArrowPathIcon className={`h-4 w-4 ${syncingSourceId === source.id ? 'animate-spin' : ''}`} /> Sync now
+                          </button>
+                        )}</Menu.Item>
+                        <Menu.Item>{({ active }) => (
+                          <button onClick={() => handleToggleActive(source)} className={`flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm text-gray-200 ${active ? 'bg-gray-800' : ''}`}>
+                            {source.isActive ? <XCircleIcon className="h-4 w-4" /> : <CheckCircleIcon className="h-4 w-4" />}
+                            {source.isActive ? 'Disable' : 'Enable'}
+                          </button>
+                        )}</Menu.Item>
+                        <Menu.Item>{({ active }) => (
+                          <button onClick={() => handleEditSource(source)} className={`flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm text-gray-200 ${active ? 'bg-gray-800' : ''}`}>
+                            <PencilIcon className="h-4 w-4" /> Edit
+                          </button>
+                        )}</Menu.Item>
+                        <Menu.Item>{({ active }) => (
+                          <button onClick={() => setShowDeleteConfirm(source.id)} className={`flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm text-red-400 ${active ? 'bg-red-950/40' : ''}`}>
+                            <TrashIcon className="h-4 w-4" /> Delete
+                          </button>
+                        )}</Menu.Item>
+                      </Menu.Items>
+                    </Menu>
                   </div>
                 </div>
               </div>
@@ -1172,38 +1210,46 @@ export default function IptvSettings() {
             </div>
           )}
         </div>
+        </>
+        )}
 
+        {isAdvancedPage && (
+        <>
         {/* EPG Sources - the single home for guide-data setup, alongside the
             IPTV playlist sources, so a provider's playlist and its EPG live
             together. The TV Guide links here rather than hosting its own copy. */}
-        <div className="mb-8 bg-gradient-to-br from-gray-900 to-black border border-red-900/30 rounded-lg p-6">
-          <h3 className="text-xl font-semibold text-white mb-2">EPG Sources</h3>
-          <p className="text-sm text-gray-400 mb-4">
-            XMLTV program guide data for your channels. If your provider's M3U didn't include
-            guide data automatically, add its XMLTV URL here.
-          </p>
+        <DisclosureSection
+          title="Guide sources"
+          description="Add or repair XMLTV data when a provider does not supply it automatically"
+          className="mb-8"
+        >
           <EpgSourcesPanel key={epgRefreshKey} />
-        </div>
+        </DisclosureSection>
 
         {/* External App Subscription URLs - playlists derived from your sources and guide */}
         <SubscriptionUrlsSection />
 
-        {/* Automatic refresh intervals - background sync settings, rarely touched */}
-        <div className="mb-8 rounded-lg border border-gray-800 bg-gray-900/70 p-6">
-          <h3 className="text-lg font-semibold text-white mb-1">Automatic Refresh</h3>
-          <p className="text-sm text-gray-400 mb-4">
-            Playlists and guide data are re-synced in the background when older than these intervals.
-            Manual syncs reset the clock. Set to 0 to disable.
-          </p>
+        {/* Refresh intervals and guide download limits. */}
+        <DisclosureSection
+          title="Refresh schedule and limits"
+          description="Override automatic refresh timing or the maximum XMLTV download size"
+          className="mb-8"
+        >
+          {iptvSettingsLoadState === 'error' && (
+            <p className="mb-4 text-sm text-red-400">
+              Unable to load these settings. Reload the page to try again.
+            </p>
+          )}
           <div className="flex flex-wrap gap-6">
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-2">Playlist refresh (hours)</label>
               <input
                 type="number"
                 min={0}
+                disabled={iptvSettingsLoadState !== 'ready'}
                 value={iptvRefreshHours}
                 onChange={(e) => setIptvRefreshHours(Math.max(0, Number(e.target.value)))}
-                className="w-32 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-red-600"
+                className="w-32 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-red-600 disabled:cursor-not-allowed disabled:opacity-50"
               />
               <p className="text-xs text-gray-500 mt-1">Default 168 (weekly)</p>
             </div>
@@ -1212,23 +1258,43 @@ export default function IptvSettings() {
               <input
                 type="number"
                 min={0}
+                disabled={iptvSettingsLoadState !== 'ready'}
                 value={epgRefreshHours}
                 onChange={(e) => setEpgRefreshHours(Math.max(0, Number(e.target.value)))}
-                className="w-32 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-red-600"
+                className="w-32 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-red-600 disabled:cursor-not-allowed disabled:opacity-50"
               />
               <p className="text-xs text-gray-500 mt-1">Default 48 (every 2 days)</p>
             </div>
+            <div>
+              <label htmlFor="epg-download-limit" className="block text-sm font-medium text-gray-300 mb-2">
+                EPG download limit (MB)
+              </label>
+              <input
+                id="epg-download-limit"
+                type="number"
+                inputMode="numeric"
+                min={1}
+                max={512}
+                disabled={iptvSettingsLoadState !== 'ready'}
+                value={epgMaxDownloadSizeMb}
+                onChange={(e) => setEpgMaxDownloadSizeMb(e.target.value)}
+                className="w-32 rounded-lg border border-gray-700 bg-gray-800 px-4 py-2 text-white focus:border-red-600 focus:outline-none focus:ring-1 focus:ring-red-500 disabled:cursor-not-allowed disabled:opacity-50"
+              />
+              <p className="text-xs text-gray-500 mt-1">Default 256. Maximum 512.</p>
+            </div>
             <div className="flex items-end">
               <button
-                onClick={saveRefreshIntervals}
-                disabled={savingRefresh}
-                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors disabled:opacity-50"
+                onClick={saveIptvSettings}
+                disabled={savingIptvSettings || iptvSettingsLoadState !== 'ready'}
+                className={BUTTON_PRIMARY}
               >
-                {savingRefresh ? 'Saving...' : 'Save Intervals'}
+                {savingIptvSettings ? 'Saving...' : 'Save Settings'}
               </button>
             </div>
           </div>
-        </div>
+        </DisclosureSection>
+        </>
+        )}
 
         {/* Add/Edit Modal */}
         {(showAddModal || editingSource) && (

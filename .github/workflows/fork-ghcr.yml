@@ -24,10 +24,16 @@ jobs:
       - uses: actions/checkout@v4
 
       # Each component of an assembly version must fit in a UInt16, so a
-      # yyyymmddHHMM stamp is not a legal revision. Use the run number.
+      # yyyymmddHHMM stamp is not a legal revision. Use the run number, on
+      # top of the version upstream declares in src/Version.cs (the same
+      # source its own release workflows read), so a rebase onto a newer
+      # upstream carries its version with it.
       - name: Compute version
         id: v
-        run: echo "version=4.1.6.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+        run: |
+          base=$(sed -n 's/.*AppVersion = "\([0-9.]*\)".*/\1/p' src/Version.cs)
+          [ -n "$base" ] || { echo "AppVersion not found in src/Version.cs"; exit 1; }
+          echo "version=$base.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-dotnet@v4
         with:

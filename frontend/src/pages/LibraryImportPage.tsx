@@ -2,6 +2,7 @@ import { formatEventDate } from '../utils/timezone';
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import {
   FolderIcon,
+  MagnifyingGlassIcon,
   CheckCircleIcon,
   XCircleIcon,
   ExclamationCircleIcon,
@@ -52,6 +53,7 @@ interface ImportableFile {
   destinationPreview?: string;
   matchConfidence?: number;
   existingEventId?: number;
+  rejections?: string[];
 }
 
 interface ScanResult {
@@ -206,7 +208,7 @@ const LibraryImportPage: React.FC = () => {
   });
 
   // Scan state
-  const [, setScanning] = useState(false);
+  const [scanning, setScanning] = useState(false);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const [scanError, setScanError] = useState<string | null>(null);
 
@@ -256,7 +258,7 @@ const LibraryImportPage: React.FC = () => {
   }, []);
 
   // Import state
-  const [, setImporting] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [importProgress, setImportProgress] = useState<string | null>(null);
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
   const [scanProgress, setScanProgress] = useState<string | null>(null);
@@ -439,6 +441,15 @@ const LibraryImportPage: React.FC = () => {
   };
 
   // Legacy quick search functions
+  const openSearchForFile = (file: ImportableFile) => {
+    setActiveFile(file);
+    setSearchQuery(file.parsedTitle || file.fileName);
+    setShowSearchModal(true);
+    if (file.parsedTitle || file.fileName) {
+      searchEvents(file.parsedTitle || file.fileName);
+    }
+  };
+
   const selectEventForFile = (event: EventSearchResult) => {
     if (!activeFile || !event.id) return;
 
@@ -890,6 +901,9 @@ const LibraryImportPage: React.FC = () => {
                               )}
                               <span className="text-gray-500 ml-2">({file.fileSizeFormatted})</span>
                             </p>
+                            {file.rejections && file.rejections.length > 0 && (
+                              <p className="text-sm text-yellow-400">{file.rejections.join(' ')}</p>
+                            )}
                           </div>
                           {!mapping && getConfidenceBadge(file.matchConfidence)}
                           <button

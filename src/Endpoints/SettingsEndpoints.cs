@@ -71,6 +71,7 @@ app.MapGet("/api/settings", async (ConfigService configService, SportarrDbContex
         // Granular folder creation settings
         CreateLeagueFolders = dbMediaSettings?.CreateLeagueFolders ?? true,
         CreateSeasonFolders = dbMediaSettings?.CreateSeasonFolders ?? true,
+        CreateEventTypeFolders = dbMediaSettings?.CreateEventTypeFolders ?? false,
         CreateEventFolders = dbMediaSettings?.CreateEventFolders ?? false,
         ReorganizeFolders = dbMediaSettings?.ReorganizeFolders ?? false,
         CopyFiles = dbMediaSettings?.CopyFiles ?? false,
@@ -218,6 +219,10 @@ app.MapGet("/api/settings", async (ConfigService configService, SportarrDbContex
         IndexerMinimumAgeMinutes = config.IndexerMinimumAgeMinutes,
         IptvPlaylistRefreshHours = config.IptvPlaylistRefreshHours,
         EpgRefreshHours = config.EpgRefreshHours,
+        EpgMaxDownloadSizeMb = Math.Clamp(
+            config.EpgMaxDownloadSizeMb,
+            Config.MinimumEpgMaxDownloadSizeMb,
+            Config.MaximumEpgMaxDownloadSizeMb),
         MaxRssReleasesPerIndexer = config.MaxRssReleasesPerIndexer,
         RssReleaseAgeLimit = config.RssReleaseAgeLimit,
 
@@ -585,6 +590,10 @@ app.MapPut("/api/settings", async (AppSettings updatedSettings, ConfigService co
         config.IndexerMinimumAgeMinutes = Math.Max(0, updatedSettings.IndexerMinimumAgeMinutes); // Clamp at 0 (no negative delays)
         config.IptvPlaylistRefreshHours = Math.Max(0, updatedSettings.IptvPlaylistRefreshHours); // 0 = disabled
         config.EpgRefreshHours = Math.Max(0, updatedSettings.EpgRefreshHours); // 0 = disabled
+        config.EpgMaxDownloadSizeMb = Math.Clamp(
+            updatedSettings.EpgMaxDownloadSizeMb,
+            Config.MinimumEpgMaxDownloadSizeMb,
+            Config.MaximumEpgMaxDownloadSizeMb);
         config.MaxRssReleasesPerIndexer = Math.Max(1, updatedSettings.MaxRssReleasesPerIndexer);
         config.RssReleaseAgeLimit = Math.Max(0, updatedSettings.RssReleaseAgeLimit); // 0 = no age limit
 
@@ -638,6 +647,7 @@ app.MapPut("/api/settings", async (AppSettings updatedSettings, ConfigService co
                 // Granular folder creation settings
                 CreateLeagueFolders = mediaManagementSettings.CreateLeagueFolders,
                 CreateSeasonFolders = mediaManagementSettings.CreateSeasonFolders,
+                CreateEventTypeFolders = mediaManagementSettings.CreateEventTypeFolders,
                 CreateEventFolders = mediaManagementSettings.CreateEventFolders,
                 ReorganizeFolders = mediaManagementSettings.ReorganizeFolders,
                 DeleteEmptyFolders = mediaManagementSettings.DeleteEmptyFolders,
@@ -679,6 +689,7 @@ app.MapPut("/api/settings", async (AppSettings updatedSettings, ConfigService co
             // Granular folder creation settings
             dbSettings.CreateLeagueFolders = mediaManagementSettings.CreateLeagueFolders;
             dbSettings.CreateSeasonFolders = mediaManagementSettings.CreateSeasonFolders;
+            dbSettings.CreateEventTypeFolders = mediaManagementSettings.CreateEventTypeFolders;
             dbSettings.CreateEventFolders = mediaManagementSettings.CreateEventFolders;
             dbSettings.ReorganizeFolders = mediaManagementSettings.ReorganizeFolders;
             dbSettings.DeleteEmptyFolders = mediaManagementSettings.DeleteEmptyFolders;
@@ -747,6 +758,19 @@ app.MapPut("/api/settings", async (AppSettings updatedSettings, ConfigService co
         logger.LogInformation("[CONFIG] EnableMultiPartEpisodes changed from {Old} to {New} - updating file format",
             previousEnableMultiPart, updatedConfig.EnableMultiPartEpisodes);
         await fileFormatManager.UpdateFileFormatForMultiPartSetting(updatedConfig.EnableMultiPartEpisodes);
+
+        var fightingSports = EventPartDetector.FightingSportNames
+            .Select(s => s.ToLowerInvariant()).ToArray();
+        var fightingEvents = await db.Events
+            .Include(e => e.League)
+            .Include(e => e.Files)
+            .AsSplitQuery()
+            .Where(e => e.Sport != null && fightingSports.Contains(e.Sport.ToLower())
+                && (e.HasFile || e.Files.Any()))
+            .ToListAsync();
+        foreach (var evt in fightingEvents)
+            evt.HasFile = EventPartDetector.AreAllMonitoredPartsPresent(evt, updatedConfig.EnableMultiPartEpisodes);
+        await db.SaveChangesAsync();
     }
 
     // CRITICAL: Sync SecuritySettings to database (used by DynamicAuthenticationMiddleware)

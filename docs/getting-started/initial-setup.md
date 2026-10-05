@@ -1,5 +1,19 @@
 # Initial Setup
 
+The setup guide walks a new install through the library, release preferences, download source, and playback. You can also use the settings pages below.
+
+## Release preferences in the setup guide
+
+Sportarr includes ready-to-use 1080p and 4K quality profiles. The 1080p profile is the initial default. You can change the default later under **Settings > Profiles**.
+
+Choose **Standard setup** to start with the built-in profiles and neutral custom format scores. Choose **Recommended setup** to import custom format scores and quality size limits from TRaSH Guides. Recommended setup needs an internet connection. If the import fails, your current release preferences stay in place so you can try again.
+
+On a new install, **Skip Step** keeps Standard setup. Reopening the guide and skipping this step does not change existing preferences. Switching from Recommended to Standard clears scores in unedited built-in profiles. Choosing Standard when it is already active leaves scores alone. Custom profiles and previously imported quality size limits are left alone.
+
+On a new install, the file naming dropdown starts with a detailed preset. Saving the step applies that preset and turns on **Rename Events**. Choose **Keep current naming** or **Skip Step** to leave naming unchanged. A reopened guide starts with **Keep current naming**, so saving it does not change existing settings unless you select a preset. TV libraries need season and episode numbers to recognize events as episodes. The `{Sportarr Id}` token then gives the Sportarr Metadata Agent an exact event key. Keep both for the most reliable matching. The guide warns when a selected format omits either one.
+
+## Manual setup
+
 Four steps take a fresh install to a working library.
 
 ## 1. Root folder
@@ -26,6 +40,10 @@ Go to **Settings > Media Management** and add a root folder. This is where Sport
 ## 4. Add content
 
 Use the search to find leagues or events. Add them to your library and Sportarr starts monitoring.
+
+Sportarr uses the league's competition format from the API to decide whether to show team selection. Team competitions let you choose which teams to follow. Individual event leagues, such as Diamond League athletics, use your event monitoring settings without a team filter, even when the source lists countries or federations as teams.
+
+If an existing individual league is missing events because of saved team selections, use **More > Sync > Deep Sync** on its league page after updating. This refreshes its competition format and imports the missing historical events.
 
 ![Search for Leagues](../images/search-league.png)
 

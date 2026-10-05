@@ -57,7 +57,7 @@ public class EventQueryService
 
         // League name (normalized - remove spaces, use abbreviations)
         var leagueName = evt.League?.Name ?? "";
-        var normalizedLeague = GetNormalizedLeagueNameForTemplate(leagueName);
+        var normalizedLeague = GetNormalizedLeagueNameForTemplate(leagueName, evt.League?.ExternalId);
         result = result.Replace("{League}", normalizedLeague, StringComparison.OrdinalIgnoreCase);
 
         // Date components - prefer the broadcast-local date so end-of-day shows
@@ -165,16 +165,16 @@ public class EventQueryService
     /// Get normalized league name for template replacement.
     /// Returns abbreviations where appropriate (NFL, NBA, UFC, etc.)
     /// </summary>
-    private string GetNormalizedLeagueNameForTemplate(string leagueName)
+    private string GetNormalizedLeagueNameForTemplate(string leagueName, string? leagueExternalId)
     {
         if (string.IsNullOrEmpty(leagueName)) return "";
 
         var lower = leagueName.ToLowerInvariant();
 
         // Common abbreviations
-        if (lower.Contains("national basketball association") || lower == "nba")
-            return "NBA";
-        if (lower.Contains("national football league") || lower == "nfl")
+        if (BasketballLeagueIdentity.Detect(leagueName) is { } basketballLeague)
+            return basketballLeague;
+        if (IsNflLeague(leagueName, leagueExternalId))
             return "NFL";
         if (lower.Contains("national hockey league") || lower == "nhl")
             return "NHL";
@@ -200,11 +200,8 @@ public class EventQueryService
     /// <summary>
     /// Build search queries for an event based on its sport type and data.
     ///
-    /// TWO-QUERY FALLBACK STRATEGY:
-    /// Returns up to 2 queries: a specific primary query + a broader fallback.
-    /// The search loop (Program.cs / AutomaticSearchService) iterates through queries
-    /// and stops early when sufficient results are found (>=10 manual, >=3 automatic).
-    /// This limits API calls to at most 2 per indexer per search.
+    /// Search callers run each distinct query unless a cache or source gate avoids it.
+    /// League rules, aliases, and user templates determine the query count.
     ///
     /// Examples:
     /// - F1 Round 2 2026 -> Primary: "Formula1 2026 Round02", Fallback: "Formula1 2026"
@@ -262,8 +259,31 @@ public class EventQueryService
 
         string queryType;
 
+        if (LeagueReleaseNamePolicy.BuildQuery(evt) is { } leagueQuery)
+        {
+            queries.Add(leagueQuery);
+            if (string.Equals(leagueName, "English Rugby League Super League", StringComparison.OrdinalIgnoreCase))
+            {
+                var queryDate = (evt.BroadcastDate ?? evt.EventDate.Date).Date;
+                if (queryDate.Day == DateTime.DaysInMonth(queryDate.Year, queryDate.Month))
+                {
+                    // A release can carry tomorrow's date across a month boundary.
+                    var nextDate = queryDate.AddDays(1);
+                    queries.Add($"Super League Rugby {nextDate.Year} {nextDate.Month:D2}");
+                }
+            }
+            var aliasYear = (evt.BroadcastDate ?? evt.EventDate.Date).Year;
+            AddTeamAliasQueries(evt, leagueName, aliasYear, queries);
+            if (evt.League?.Name.Contains("Supercars", StringComparison.OrdinalIgnoreCase) == true &&
+                int.TryParse(evt.Round, out var supercarsRound) && supercarsRound is > 0 and < 100)
+            {
+                var year = (evt.BroadcastDate ?? evt.EventDate).Year;
+                queries.Add($"Supercars {year} Round{supercarsRound:D2}");
+            }
+            queryType = "LeagueReleaseName";
+        }
         // Check if this is a motorsport event (checks sport, league, AND event title)
-        if (IsMotorsport(sport, leagueName, evt.Title))
+        else if (IsMotorsport(sport, leagueName, evt.Title))
         {
             BuildMotorsportQueries(evt, leagueName, queries);
             queryType = "Motorsport";
@@ -278,10 +298,25 @@ public class EventQueryService
             BuildFightingQueries(evt, leagueName, queries);
             queryType = "Fighting";
         }
+        else if (CricketRugbyReleaseNamePolicy.BuildQuery(evt) is { } observedQuery)
+        {
+            queries.Add(observedQuery);
+            queryType = "ObservedTeamSport";
+        }
         else if (IsTeamSport(sport, leagueName))
         {
             BuildTeamSportQueries(evt, leagueName, queries);
             queryType = "TeamSport";
+        }
+        else if (IsCyclingSport(sport, leagueName))
+        {
+            BuildCyclingQueries(evt, queries);
+            queryType = "Cycling";
+        }
+        else if (IsGolfSport(sport, leagueName))
+        {
+            BuildGolfQueries(evt, queries);
+            queryType = "Golf";
         }
         else
         {
@@ -306,6 +341,63 @@ public class EventQueryService
 
         return deduped;
     }
+
+    public List<string> BuildOverflowFallbackQueries(Event evt, IReadOnlyList<string> primaryQueries,
+        IReadOnlyList<IndexerSearchDiagnostic> diagnostics, string? customTemplate = null)
+    {
+        var isRugbySuperLeague = string.Equals(evt.League?.Name, "English Rugby League Super League", StringComparison.OrdinalIgnoreCase);
+        var isFibaAmeriCup = string.Equals(evt.League?.Name?.Trim(), "FIBA AmeriCup", StringComparison.OrdinalIgnoreCase);
+        var queryDate = (evt.BroadcastDate ?? evt.EventDate.Date).Date;
+        var monthQueryCount = isRugbySuperLeague &&
+            queryDate.Day == DateTime.DaysInMonth(queryDate.Year, queryDate.Month) ? 2 : 1;
+        if (!MayUseOverflowFallback(evt, customTemplate) || primaryQueries.Count == 0 ||
+            isRugbySuperLeague && !string.Equals(primaryQueries[0], LeagueReleaseNamePolicy.BuildQuery(evt), StringComparison.OrdinalIgnoreCase) ||
+            isFibaAmeriCup && !string.Equals(primaryQueries[0], $"FIBA AmeriCup {queryDate.Year}", StringComparison.OrdinalIgnoreCase) ||
+            !diagnostics.Any(diagnostic =>
+                primaryQueries.Take(monthQueryCount).Contains(diagnostic.Query, StringComparer.OrdinalIgnoreCase) &&
+                diagnostic.Termination is SearchTermination.CallerCeiling or SearchTermination.PageCeiling))
+        {
+            return new List<string>();
+        }
+
+        if (isFibaAmeriCup)
+        {
+            var (home, away) = ResolveTeamNames(evt);
+            if (string.IsNullOrWhiteSpace(home) || string.IsNullOrWhiteSpace(away))
+                return new List<string>();
+
+            var homeQuery = Regex.Replace(home.Trim(), @"\s+Basketball$", "", RegexOptions.IgnoreCase);
+            var awayQuery = Regex.Replace(away.Trim(), @"\s+Basketball$", "", RegexOptions.IgnoreCase);
+            var pairQuery = $"FIBA AmeriCup {queryDate.Year} {homeQuery} {awayQuery}";
+            return primaryQueries.Contains(pairQuery, StringComparer.OrdinalIgnoreCase)
+                ? new List<string>() : new List<string> { pairQuery };
+        }
+
+        var fallback = new List<string>();
+        BuildTeamSportQueries(evt, evt.League!.Name, fallback);
+        if (isRugbySuperLeague && fallback.Count > 1)
+        {
+            var (home, away) = ResolveTeamNames(evt);
+            if (home != null && away != null)
+            {
+                var homeAlias = TeamNameVariationData.Variations.TryGetValue(home, out var homeVariations)
+                    ? homeVariations.FirstOrDefault() ?? home : home;
+                var awayAlias = TeamNameVariationData.Variations.TryGetValue(away, out var awayVariations)
+                    ? awayVariations.FirstOrDefault() ?? away : away;
+                if (homeAlias != home || awayAlias != away)
+                    fallback[1] = $"{homeAlias} vs {awayAlias}";
+            }
+        }
+        return fallback.Take(2).Where(query => !primaryQueries.Contains(query, StringComparer.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    internal static bool MayUseOverflowFallback(Event evt, string? customTemplate) =>
+        (string.Equals(evt.League?.Name, "Dutch Eredivisie", StringComparison.OrdinalIgnoreCase) ||
+         string.Equals(evt.League?.Name, "English Rugby League Super League", StringComparison.OrdinalIgnoreCase) ||
+         string.Equals(evt.League?.Name?.Trim(), "FIBA AmeriCup", StringComparison.OrdinalIgnoreCase) &&
+         evt.HomeTeamId.HasValue && evt.AwayTeamId.HasValue && evt.HomeTeamId != evt.AwayTeamId) &&
+        SearchTemplateList.Parse(customTemplate).Count == 0;
 
     /// <summary>
     /// Check if this is a wrestling show (WWE, AEW) — needs date-based queries, not event-number queries.
@@ -349,6 +441,35 @@ public class EventQueryService
         return teamSportKeywords.Any(k => sportLower.Contains(k) || leagueLower.Contains(k));
     }
 
+    private static bool IsCyclingSport(string sport, string? leagueName) =>
+        sport.Contains("cycling", StringComparison.OrdinalIgnoreCase) ||
+        leagueName?.Contains("cycling", StringComparison.OrdinalIgnoreCase) == true ||
+        leagueName?.Contains("UCI", StringComparison.OrdinalIgnoreCase) == true;
+
+    private static bool IsGolfSport(string sport, string? leagueName) =>
+        sport.Contains("golf", StringComparison.OrdinalIgnoreCase) ||
+        leagueName?.Contains("PGA", StringComparison.OrdinalIgnoreCase) == true;
+
+    private static void BuildCyclingQueries(Event evt, List<string> queries)
+    {
+        var title = Regex.Replace(evt.Title ?? "", @"(?<=[\p{Ll}])(?=[\p{Lu}])", " ");
+        title = Regex.Replace(title, @"[^\p{L}\p{N}]+", " ").Trim();
+        var year = (evt.BroadcastDate ?? evt.EventDate).Year;
+        queries.Add($"{title} {year}");
+    }
+
+    private static void BuildGolfQueries(Event evt, List<string> queries)
+    {
+        var year = (evt.BroadcastDate ?? evt.EventDate).Year;
+        if (Regex.IsMatch(evt.Title ?? "", @"\bMasters\s+Tournament\b", RegexOptions.IgnoreCase))
+        {
+            queries.Add($"Masters {year}");
+            return;
+        }
+
+        queries.Add((evt.Title ?? "").Trim());
+    }
+
     /// <summary>
     /// Build motorsport queries: specific (series + year + round) then location fallbacks then broad (series + year).
     ///
@@ -373,6 +494,7 @@ public class EventQueryService
         { "Canadian", "Canada" },
         { "Chinese", "China" },
         { "Dutch", "Netherlands" },
+        { "French", "France" },
         { "Hungarian", "Hungary" },
         { "Italian", "Italy" },
         { "Japanese", "Japan" },
@@ -382,10 +504,90 @@ public class EventQueryService
         { "United States", "USA" },
     };
 
+    internal string? BuildMetadataTitleProbe(Event evt, IEnumerable<string> existingQueries)
+    {
+        if (GetTeamSportLeaguePrefix(evt.League?.Name, evt.League?.ExternalId) == "NBA")
+        {
+            var (homeName, awayName) = ResolveTeamNames(evt);
+            var hasStablePair = !string.IsNullOrWhiteSpace(homeName) &&
+                !string.IsNullOrWhiteSpace(awayName) &&
+                evt.HomeTeamId.HasValue &&
+                evt.AwayTeamId.HasValue &&
+                evt.HomeTeamId.Value != evt.AwayTeamId.Value;
+            if (!hasStablePair)
+                return null;
+
+            var queryDate = evt.BroadcastDate ?? evt.EventDate.Date;
+            var datedQuery = $"NBA {queryDate:yyyy MM dd}";
+            return existingQueries.Contains(datedQuery, StringComparer.OrdinalIgnoreCase) ? null : datedQuery;
+        }
+
+        if (evt.League?.Name.Contains("Supercars", StringComparison.OrdinalIgnoreCase) == true &&
+            int.TryParse(evt.Round, out var supercarsRound) && supercarsRound is > 0 and < 100)
+        {
+            var supercarsYear = (evt.BroadcastDate ?? evt.EventDate).Year;
+            var roundQuery = $"Supercars {supercarsYear} Round{supercarsRound:D2}";
+            return existingQueries.Contains(roundQuery, StringComparer.OrdinalIgnoreCase) ? null : roundQuery;
+        }
+
+        if (!EventPartDetector.IsMotorsport(evt.Sport ?? "") || string.IsNullOrWhiteSpace(evt.Title))
+            return null;
+
+        var leagueName = evt.League?.Name;
+        var seriesKey = GetMotorsportSeriesPrefix(leagueName);
+        var year = (evt.BroadcastDate ?? evt.EventDate).Year;
+        var primaryQueries = existingQueries.ToArray();
+        var broadQuery = seriesKey switch
+        {
+            "NASCAR" when leagueName?.Contains("Cup Series", StringComparison.OrdinalIgnoreCase) == true =>
+                $"NASCAR Cup Series {year}",
+            "WEC" => $"WEC {year}",
+            "WRC" => $"WRC {year}",
+            _ => null
+        };
+        if (broadQuery != null && primaryQueries.Contains(broadQuery, StringComparer.OrdinalIgnoreCase))
+        {
+            string eventIdentity;
+            if (seriesKey is "WEC" or "WRC" &&
+                int.TryParse(evt.Round, out var round) && round is > 0 and < 100)
+            {
+                eventIdentity = $"Round{round:D2}";
+            }
+            else
+            {
+                var titleRoot = Regex.Split(evt.Title, @"\s+-\s+", RegexOptions.CultureInvariant)[0];
+                eventIdentity = CleanQueryWords(titleRoot);
+                if (seriesKey == "WRC")
+                {
+                    eventIdentity = Regex.Replace(eventIdentity, @"^WRC\s+", "", RegexOptions.IgnoreCase).Trim();
+                }
+            }
+
+            var specificQuery = $"{broadQuery} {eventIdentity}".Trim();
+            if (specificQuery.Length <= 256 &&
+                !specificQuery.Equals(broadQuery, StringComparison.OrdinalIgnoreCase) &&
+                !primaryQueries.Contains(specificQuery, StringComparer.OrdinalIgnoreCase))
+            {
+                return specificQuery;
+            }
+        }
+
+        var phrase = string.Join(" ", Regex.Matches(evt.Title, @"[\p{L}\p{N}]+")
+            .Select(match => match.Value));
+        if (phrase.Length is 0 or > 256)
+            return null;
+
+        // A meeting name keeps a session-only title from becoming a broad query.
+        var meeting = Regex.Match(phrase, @"^(?<name>.+?)\s+Grand Prix(?:\s+.*)?$", RegexOptions.IgnoreCase);
+        if (!meeting.Success || !Regex.IsMatch(meeting.Groups["name"].Value, @"\p{L}"))
+            return null;
+
+        return existingQueries.Contains(phrase, StringComparer.OrdinalIgnoreCase) ? null : phrase;
+    }
+
     private void BuildMotorsportQueries(Event evt, string? leagueName, List<string> queries)
     {
         var seriesKey = GetMotorsportSeriesPrefix(leagueName);
-        var searchPrefixes = GetMotorsportSearchPrefixes(seriesKey);
         var brandingDate = evt.BroadcastDate ?? evt.EventDate;
         int year;
         if (seriesKey == "FormulaE" && !string.IsNullOrEmpty(evt.Season))
@@ -397,12 +599,30 @@ public class EventQueryService
             year = brandingDate.Year;
         }
 
+        if (TryBuildMeasuredMotorsportQuery(evt, leagueName, seriesKey, year, out var measuredQuery))
+        {
+            queries.Add(measuredQuery);
+            return;
+        }
+
+        var searchPrefixes = GetMotorsportSearchPrefixes(seriesKey);
+
         // Compute round and title-derived location once; they're independent of the
         // search-name form below.
         int? round = null;
         if (!string.IsNullOrEmpty(evt.Round) && int.TryParse(evt.Round, out var roundNum) && roundNum > 0 && roundNum < 100)
         {
             round = roundNum;
+        }
+
+        // A race number the event title carries ("... - Race 25"). Releases
+        // from earlier seasons are named by that number and nothing else that
+        // this event holds, so a query without it never reaches them.
+        int? raceNumber = null;
+        var raceMatch = Regex.Match(evt.Title ?? "", @"\bRace\s+(\d{1,3})\s*$", RegexOptions.IgnoreCase);
+        if (raceMatch.Success && int.TryParse(raceMatch.Groups[1].Value, out var raceNum) && raceNum > 0)
+        {
+            raceNumber = raceNum;
         }
 
         // Derive a location word from the event title (e.g. "Chinese" from "Chinese Grand Prix")
@@ -429,6 +649,15 @@ public class EventQueryService
                 queries.Add($"{prefix} {year} Round{round.Value:D2}");
             }
 
+            // A series that numbers its races across the season names them
+            // that way in its releases too ("Supercars 2025 Race 25"). The
+            // number comes from the event's own title, so only a series that
+            // is numbered this way asks for it.
+            if (raceNumber.HasValue)
+            {
+                queries.Add($"{prefix} {year} Race {raceNumber.Value}");
+            }
+
             // Location queries catch releases named after the venue or country
             // rather than the round ("motogp.2026.italy..."), which an indexer
             // can otherwise bury under the broad season query. Every series
@@ -436,7 +665,11 @@ public class EventQueryService
             // that names events some other way from emitting junk, because a
             // missing location or a title without a Grand Prix simply adds
             // nothing.
-            if (!string.IsNullOrEmpty(evt.Location))
+            // A location of "AU" or "US" is a country code, not a venue, and
+            // the query it makes ("Supercars 2025 AU") returns nothing on any
+            // indexer. Only a real place name is worth a query.
+            if (!string.IsNullOrEmpty(evt.Location) &&
+                (evt.Location.Length > 3 || evt.Location.Contains(' ')))
             {
                 queries.Add($"{prefix} {year} {evt.Location}");
             }
@@ -458,6 +691,93 @@ public class EventQueryService
             queries.Add($"{prefix} {year}");
         }
     }
+
+    private static bool TryBuildMeasuredMotorsportQuery(
+        Event evt,
+        string? leagueName,
+        string seriesKey,
+        int year,
+        out string query)
+    {
+        query = "";
+        var title = CleanQueryWords(evt.Title);
+        var round = int.TryParse(evt.Round, out var parsedRound) && parsedRound is > 0 and < 100
+            ? parsedRound
+            : (int?)null;
+
+        if (seriesKey == "NASCAR" &&
+            leagueName?.Contains("Cup Series", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            query = $"NASCAR Cup Series {year}";
+            return true;
+        }
+
+        if (seriesKey == "IndyCar")
+        {
+            if (Regex.IsMatch(title, @"\bIndianapolis\s*500\b", RegexOptions.IgnoreCase))
+            {
+                query = $"IndyCar {year} Indianapolis 500";
+                return true;
+            }
+
+            var session = EventPartDetector.DetectMotorsportSessionIdentity(
+                title, leagueName, releaseTitle: false);
+            if (session == "Qualifying")
+            {
+                query = $"IndyCar {year} Qualifying";
+                return true;
+            }
+
+            query = round.HasValue
+                ? $"IndyCar {year} Round{round.Value:D2}"
+                : $"IndyCar {year}";
+            return true;
+        }
+
+        if (seriesKey == "WEC")
+        {
+            if (Regex.IsMatch(title, @"\b24\s+Hours\s+of\s+Le\s+Mans\b", RegexOptions.IgnoreCase))
+            {
+                query = $"WEC {year} Le Mans";
+                return true;
+            }
+
+            query = $"WEC {year}";
+            return true;
+        }
+
+        if (seriesKey == "WRC")
+        {
+            query = $"WRC {year}";
+            return true;
+        }
+
+        if (seriesKey == "BSB" && round.HasValue)
+        {
+            query = $"BSB {year} Round{round.Value:D2}";
+            return true;
+        }
+
+        if (seriesKey == "WSBK" && round.HasValue)
+        {
+            var location = GpDemonymToCountry
+                .FirstOrDefault(pair => Regex.IsMatch(title, $@"\b{Regex.Escape(pair.Key)}\b", RegexOptions.IgnoreCase))
+                .Value;
+            if (!string.IsNullOrWhiteSpace(location))
+            {
+                query = $"WSBK {year} Round{round.Value:D2} {location}";
+                return true;
+            }
+
+            query = $"WSBK {year} Round{round.Value:D2}";
+            return true;
+        }
+
+        return false;
+    }
+
+    private static string CleanQueryWords(string? title) =>
+        Regex.Replace(title ?? "", @"[^\p{L}\p{N}]+", " ").Trim();
 
     /// <summary>
     /// Build wrestling queries (WWE, AEW).
@@ -593,8 +913,6 @@ public class EventQueryService
             // UTC-rolled-over 2026-01-01 that nothing publishes.
             var date = evt.BroadcastDate ?? evt.EventDate.Date;
             queries.Add($"{org} {matchedShow} {date.Year} {date.Month:D2} {date.Day:D2}");
-            // Fallback: "WWE RAW 2026 03" (month-level)
-            queries.Add($"{org} {matchedShow} {date.Year} {date.Month:D2}");
 
             _logger.LogDebug("[EventQuery] Wrestling weekly show: {Org} {Show} on {Date:yyyy-MM-dd}",
                 org, matchedShow, date);
@@ -610,10 +928,12 @@ public class EventQueryService
             if (!string.IsNullOrEmpty(eventName))
             {
                 var brandingYear = (evt.BroadcastDate ?? evt.EventDate).Year;
-                // Primary: "WWE WrestleMania 2026"
-                queries.Add($"{org} {eventName} {brandingYear}");
-                // Fallback: "WWE WrestleMania"
-                queries.Add($"{org} {eventName}");
+                var hasEventNumber = Regex.IsMatch(eventName,
+                    @"\b(?:WrestleMania|Royal\s+Rumble)\s+\d{1,3}\b",
+                    RegexOptions.IgnoreCase);
+                queries.Add(hasEventNumber
+                    ? $"{org} {eventName}"
+                    : $"{org} {eventName} {brandingYear}");
             }
             else
             {
@@ -631,6 +951,46 @@ public class EventQueryService
     private void BuildFightingQueries(Event evt, string? leagueName, List<string> queries)
     {
         var title = evt.Title ?? "";
+        var brandingYear = (evt.BroadcastDate ?? evt.EventDate).Year;
+
+        if (leagueName?.Contains("Boxing", StringComparison.OrdinalIgnoreCase) == true &&
+            EventPartDetector.TryExtractFighterSurnames(title, out var boxerA, out var boxerB))
+        {
+            queries.Add($"{boxerA} vs {boxerB}");
+            return;
+        }
+
+        if (string.Equals(leagueName, "ONE", StringComparison.OrdinalIgnoreCase) ||
+            leagueName?.Contains("ONE Championship", StringComparison.OrdinalIgnoreCase) == true ||
+            leagueName?.Contains("ONE FC", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            var namedCard = Regex.Match(title,
+                @"^ONE\s+(?:(?:Fight\s+Night|Friday\s+Fights|Samurai)\s+)?\d{1,3}\b",
+                RegexOptions.IgnoreCase);
+            queries.Add(namedCard.Success ? namedCard.Value : StripFightersFromTitle(title));
+            return;
+        }
+
+        if (string.Equals(leagueName, "PFL", StringComparison.OrdinalIgnoreCase) ||
+            leagueName?.Contains("Professional Fighters League", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            var cardName = StripFightersFromTitle(title);
+            var regional = Regex.Match(cardName,
+                @"^PFL\s+(?<region>Africa|Europe|MENA|Pacific)\s+\d+\s+(?<location>.+)$",
+                RegexOptions.IgnoreCase);
+            if (regional.Success)
+            {
+                queries.Add($"PFL {regional.Groups["region"].Value} {regional.Groups["location"].Value}");
+                return;
+            }
+
+            var cleanedCardName = CleanQueryWords(cardName);
+            queries.Add(string.Equals(cardName, title, StringComparison.Ordinal) ||
+                        Regex.IsMatch(cleanedCardName, $@"\b{brandingYear}\b", RegexOptions.CultureInvariant)
+                ? cleanedCardName
+                : $"{cleanedCardName} {brandingYear}");
+            return;
+        }
 
         // Try to extract org + event number (e.g., "UFC 299", "UFC Fight Night 240")
         var patterns = new[]
@@ -677,7 +1037,6 @@ public class EventQueryService
             }
         }
 
-        var brandingYear = (evt.BroadcastDate ?? evt.EventDate).Year;
         // Surname matchup query ("Wardley vs Dubois"). Fight releases almost
         // never carry first names - "Boxing.2026.05.09.Wardley.vs.Dubois..."
         // is the dominant convention - so a full-name title query returns
@@ -755,9 +1114,69 @@ public class EventQueryService
     /// </summary>
     private void BuildTeamSportQueries(Event evt, string? leagueName, List<string> queries)
     {
-        var leaguePrefix = GetTeamSportLeaguePrefix(leagueName);
+        var leaguePrefix = GetTeamSportLeaguePrefix(leagueName, evt.League?.ExternalId);
         var queryDate = evt.BroadcastDate ?? evt.EventDate.Date;
         var year = queryDate.Year;
+        var (homeName, awayName) = ResolveTeamNames(evt);
+        var hasStablePair = !string.IsNullOrWhiteSpace(homeName) &&
+            !string.IsNullOrWhiteSpace(awayName) &&
+            evt.HomeTeamId.HasValue &&
+            evt.AwayTeamId.HasValue &&
+            evt.HomeTeamId.Value != evt.AwayTeamId.Value;
+
+        if (hasStablePair && string.Equals(leagueName?.Trim(), "FIBA AmeriCup", StringComparison.OrdinalIgnoreCase))
+        {
+            queries.Add($"FIBA AmeriCup {year}");
+            AddTeamAliasQueries(evt, leagueName, year, queries);
+            return;
+        }
+
+        if (hasStablePair && FootballReleaseNamePolicy.IsEnglishChampionship(leagueName))
+        {
+            queries.Add($"EFL Championship {year}");
+            AddTeamAliasQueries(evt, "EFL Championship", year, queries);
+            return;
+        }
+
+        if (hasStablePair && (leaguePrefix == "NBA" || IsVerifiedCompactPairLeague(leagueName) ||
+            FootballReleaseNamePolicy.IsFaCup(leagueName) ||
+            FootballReleaseNamePolicy.IsEuropaLeague(leagueName) ||
+            FootballReleaseNamePolicy.IsEnglishWomensSuperLeague(leagueName) ||
+            FootballReleaseNamePolicy.IsFifaWorldCup(leagueName) ||
+            FootballReleaseNamePolicy.IsNwslChallengeCup(leagueName)))
+        {
+            if (leaguePrefix == "NBA")
+            {
+                var homeFirst = evt.HomeTeamId.GetValueOrDefault() < evt.AwayTeamId.GetValueOrDefault();
+                var first = homeFirst ? homeName! : awayName!;
+                var second = homeFirst ? awayName! : homeName!;
+                first = first.Split(' ', StringSplitOptions.RemoveEmptyEntries).Last();
+                second = second.Split(' ', StringSplitOptions.RemoveEmptyEntries).Last();
+                queries.Add($"NBA {first} {second}");
+            }
+            else
+            {
+                var titleTeams = Regex.Split(evt.Title, @"\s+vs\.?\s+", RegexOptions.IgnoreCase)
+                    .Select(name => name.Trim())
+                    .Where(name => !string.IsNullOrWhiteSpace(name))
+                    .ToArray();
+                var teamNames = titleTeams.Length == 2 ? titleTeams : new[] { homeName!, awayName! };
+                var participantQuery = string.Join(" ", teamNames
+                    .Select(name => FootballReleaseNamePolicy.BaseParticipantName(name, leagueName))
+                    .Order(StringComparer.OrdinalIgnoreCase));
+                var queryPrefix = FootballReleaseNamePolicy.IsFaCup(leagueName) ? "FA Cup "
+                    : FootballReleaseNamePolicy.IsEnglishWomensSuperLeague(leagueName) ? "WSL "
+                    : "";
+                queries.Add(queryPrefix + participantQuery);
+            }
+
+            var trimmedLeagueName = leagueName?.Trim();
+            var aliasLeagueToken = string.Equals(trimmedLeagueName, "Australian WNBL", StringComparison.OrdinalIgnoreCase)
+                ? trimmedLeagueName
+                : leaguePrefix;
+            AddTeamAliasQueries(evt, aliasLeagueToken, year, queries);
+            return;
+        }
 
         if (string.IsNullOrEmpty(leaguePrefix))
         {
@@ -775,12 +1194,12 @@ public class EventQueryService
             // sports especially - the very case this fallback exists for)
             // never get. The canonical "Home vs Away" title is the last resort
             // when both are absent.
-            var homeName = evt.HomeTeamName ?? evt.HomeTeam?.Name;
-            var awayName = evt.AwayTeamName ?? evt.AwayTeam?.Name;
+            var fallbackHomeName = evt.HomeTeamName ?? evt.HomeTeam?.Name;
+            var fallbackAwayName = evt.AwayTeamName ?? evt.AwayTeam?.Name;
             string? reversed = null;
-            if (!string.IsNullOrWhiteSpace(homeName) && !string.IsNullOrWhiteSpace(awayName))
+            if (!string.IsNullOrWhiteSpace(fallbackHomeName) && !string.IsNullOrWhiteSpace(fallbackAwayName))
             {
-                reversed = $"{awayName} vs {homeName}";
+                reversed = $"{fallbackAwayName} vs {fallbackHomeName}";
             }
             else
             {
@@ -809,6 +1228,17 @@ public class EventQueryService
         // Fallback: "NFL 2025" (year only)
         queries.Add($"{leaguePrefix} {year}");
         AddTeamAliasQueries(evt, leaguePrefix, year, queries);
+    }
+
+    private static bool IsVerifiedCompactPairLeague(string? leagueName)
+    {
+        return leagueName?.Trim().ToLowerInvariant() is
+            "australian wnbl" or
+            "english premier league" or "premier league" or
+            "spanish la liga" or "la liga" or
+            "german bundesliga" or "bundesliga" or
+            "italian serie a" or "serie a" or
+            "french ligue 1" or "ligue 1";
     }
 
     /// <summary>
@@ -967,7 +1397,26 @@ public class EventQueryService
     {
         var queries = new List<string>();
         var leagueName = evt.League?.Name;
-        var leaguePrefix = GetTeamSportLeaguePrefix(leagueName);
+
+        if (LeagueReleaseNamePolicy.IsChineseCbaSeasonPack(evt))
+        {
+            var season = Regex.Match(
+                evt.Season ?? string.Empty,
+                @"^(?<start>20[0-9]{2})[^0-9]+(?<end>(?:20)?[0-9]{2})$",
+                RegexOptions.CultureInvariant);
+            if (!season.Success) return queries;
+
+            var startYear = int.Parse(season.Groups["start"].Value);
+            var endText = season.Groups["end"].Value;
+            var endYear = endText.Length == 2
+                ? startYear / 100 * 100 + int.Parse(endText)
+                : int.Parse(endText);
+            if (endYear <= startYear) endYear += 100;
+            queries.Add($"Chinese Basketball Association {startYear} {endYear % 100:D2}");
+            return queries;
+        }
+
+        var leaguePrefix = GetTeamSportLeaguePrefix(leagueName, evt.League?.ExternalId);
 
         if (string.IsNullOrEmpty(leaguePrefix))
         {
@@ -1033,12 +1482,12 @@ public class EventQueryService
         // Calculate based on league season start dates
         DateTime seasonStart;
 
-        if (leagueName.Contains("nfl") || leagueName.Contains("national football league"))
+        if (IsNflLeague(evt.League?.Name, evt.League?.ExternalId))
         {
             // NFL: Season starts first Thursday after Labor Day (first Monday of September)
             seasonStart = GetNflSeasonStart(eventDate.Year);
         }
-        else if (leagueName.Contains("nba") || leagueName.Contains("national basketball association"))
+        else if (BasketballLeagueIdentity.Detect(leagueName) == "NBA")
         {
             // NBA: Season typically starts mid-October
             seasonStart = new DateTime(eventDate.Year, 10, 15);
@@ -1104,15 +1553,25 @@ public class EventQueryService
         return false;
     }
 
-    private string GetTeamSportLeaguePrefix(string? leagueName)
+    private static bool IsNflLeague(string? leagueName, string? leagueExternalId)
+    {
+        if (string.Equals(leagueExternalId, "lg-000032", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        var name = leagueName?.Trim();
+        return string.Equals(name, "NFL", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(name, "National Football League", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private string GetTeamSportLeaguePrefix(string? leagueName, string? leagueExternalId)
     {
         if (string.IsNullOrEmpty(leagueName)) return "";
 
         var lower = leagueName.ToLowerInvariant();
 
-        if (lower.Contains("national basketball association") || lower.Contains("nba"))
-            return "NBA";
-        if (lower.Contains("national football league") || lower.Contains("nfl"))
+        if (BasketballLeagueIdentity.Detect(leagueName) is { } basketballLeague)
+            return basketballLeague;
+        if (IsNflLeague(leagueName, leagueExternalId))
             return "NFL";
         if (lower.Contains("national hockey league") || lower.Contains("nhl"))
             return "NHL";
@@ -1159,6 +1618,12 @@ public class EventQueryService
             return "IndyCar";
         if (lower.Contains("wrc") || lower.Contains("world rally"))
             return "WRC";
+        // The series dropped "V8" in 2016 and every release since is filed
+        // under Supercars alone. The metadata still says V8 Supercars, and a
+        // query built from that name returns nothing at all, so the name the
+        // releases use wins here whichever name the league carries.
+        if (lower.Contains("supercars"))
+            return "Supercars";
 
         // British Superbike, checked before World Superbike so the shared
         // "superbike" word cannot pull it into the wrong series. Releases
@@ -1208,6 +1673,8 @@ public class EventQueryService
         // This handles seasonal league names in the database
         var yearPattern = new Regex(@"\s+(19|20)\d{2}(-\d{2,4})?$", RegexOptions.IgnoreCase);
         var cleanedName = yearPattern.Replace(leagueName, "").Trim();
+        if (BasketballLeagueIdentity.Detect(cleanedName) is { } basketballLeague)
+            return basketballLeague;
 
         // Common league name mappings for searches
         var mappings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
@@ -1248,21 +1715,7 @@ public class EventQueryService
     /// </summary>
     public string StripFightersFromTitle(string title)
     {
-        if (string.IsNullOrWhiteSpace(title)) return title ?? string.Empty;
-
-        // Trailing "name vs name" where each side is 1-3 words. \bvs\.?\b tolerates
-        // both "vs" and "vs." as separators.
-        var match = Regex.Match(title,
-            @"^(.{2,}?)\s+\S+(?:\s+\S+){0,2}\s+vs\.?\s+\S+(?:\s+\S+){0,2}\s*$",
-            RegexOptions.IgnoreCase);
-
-        if (!match.Success) return title.Trim();
-
-        var prefix = match.Groups[1].Value.Trim();
-        // Require at least 2 prefix words so soccer-style "Lakers vs Celtics" isn't
-        // collapsed to "Lakers".
-        var prefixWordCount = prefix.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries).Length;
-        return prefixWordCount >= 2 ? prefix : title.Trim();
+        return SearchNormalizationService.StripTrailingCombatParticipants(title);
     }
 
     // Trailing stage designator of a stage race, for example

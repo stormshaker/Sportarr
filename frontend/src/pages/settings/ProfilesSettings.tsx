@@ -365,7 +365,7 @@ export default function ProfilesSettings({ showAdvanced = false }: ProfilesSetti
           const updatedResponse = await apiGet(`/api/qualityprofile/${editingProfile.id}`);
           if (updatedResponse.ok) {
             const updatedProfile = await updatedResponse.json();
-            const formatItemsWithNames = updatedProfile.formatItems?.map((item: { formatId: number }) => {
+            const formatItemsWithNames = updatedProfile.formatItems?.map((item: any) => {
               const format = customFormats.find(f => f.id === item.formatId);
               return {
                 ...item,
@@ -577,6 +577,46 @@ export default function ProfilesSettings({ showAdvanced = false }: ProfilesSetti
   };
 
   // Legacy handler - now requires a defined id to avoid matching all undefined items
+  const handleToggleQuality = (itemId: number | undefined, isGroup: boolean = false) => {
+    // If itemId is undefined, do nothing to prevent toggling all items
+    if (itemId === undefined) {
+      console.warn('handleToggleQuality called with undefined id');
+      return;
+    }
+
+    setFormData(prev => ({
+      ...prev,
+      items: prev.items?.map(item => {
+        if (item.id === itemId) {
+          const newAllowed = !item.allowed;
+          // If it's a group, toggle all children too
+          if (isGroup && item.items) {
+            return {
+              ...item,
+              allowed: newAllowed,
+              items: item.items.map(child => ({ ...child, allowed: newAllowed }))
+            };
+          }
+          return { ...item, allowed: newAllowed };
+        }
+        // Check if the target is inside a group
+        if (item.items) {
+          const updatedItems = item.items.map(child =>
+            child.id === itemId ? { ...child, allowed: !child.allowed } : child
+          );
+          // Check if any child actually changed
+          const hasChange = item.items.some((c, i) => c.allowed !== updatedItems[i].allowed);
+          if (hasChange) {
+            // If any child changed, update the group's allowed state
+            const anyAllowed = updatedItems.some(child => child.allowed);
+            return { ...item, items: updatedItems, allowed: anyAllowed };
+          }
+        }
+        return item;
+      })
+    }));
+  };
+
   // Move item up in the list
   const handleMoveUp = (index: number) => {
     if (index === 0) return;
@@ -1330,7 +1370,10 @@ export default function ProfilesSettings({ showAdvanced = false }: ProfilesSetti
                   className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-red-600 focus:ring-red-600"
                 />
                 <span className="text-sm font-medium text-gray-300">
-                  Upgrades Allowed (If disabled qualities will not be upgraded)
+                  Upgrade existing files
+                  <span className="block text-xs font-normal text-gray-400">
+                    Allows automatic searches, RSS feeds, and pushed releases to replace files with preferred releases. Turn off to stop automatic replacements. Manual imports can still replace files.
+                  </span>
                 </span>
               </label>
 

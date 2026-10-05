@@ -8,6 +8,10 @@ namespace Sportarr.Api.Models;
 [XmlRoot("Config")]
 public class Config
 {
+    public const int DefaultEpgMaxDownloadSizeMb = 256;
+    public const int MinimumEpgMaxDownloadSizeMb = 1;
+    public const int MaximumEpgMaxDownloadSizeMb = 512;
+
     // Security
     public string ApiKey { get; set; } = Guid.NewGuid().ToString("N");
     public string AuthenticationMethod { get; set; } = "None"; // None, Basic, Forms
@@ -261,6 +265,7 @@ public class Config
     /// </summary>
     public string IptvTrustedNetworks { get; set; } = "";
     public int EpgRefreshHours { get; set; } = 48; // every 2 days
+    public int EpgMaxDownloadSizeMb { get; set; } = DefaultEpgMaxDownloadSizeMb;
 
     // Backlog Search Settings — scheduled missing/cutoff-unmet search.
     // RSS only catches recent releases. The backlog service walks past-aired monitored
@@ -315,6 +320,8 @@ public class Config
     public string DownloadPropersAndRepacks { get; set; } = "preferAndUpgrade"; // preferAndUpgrade | doNotUpgrade | doNotPrefer
     public bool DvrOvertimeGuardEnabled { get; set; } = true; // Keep recording past the scheduled end while livescore says the event is still in progress
     public int DvrOvertimeMaxExtensionMinutes { get; set; } = 120; // Ceiling on total overtime extension per recording (0 = disabled)
+    public bool DvrEarlyFinishGuardEnabled { get; set; } = false;
+    public int DvrEarlyFinishBufferMinutes { get; set; } = 5;
     public bool DvrReresolveChannelsEnabled { get; set; } = true; // Move a scheduled recording to a better channel when new EPG data arrives
     public int DvrReresolveLockMinutes { get; set; } = 45; // Stop changing the channel this many minutes before the recording starts
     public int DvrReresolveMinImprovement { get; set; } = 10; // Confidence points a rival channel must beat the current one by

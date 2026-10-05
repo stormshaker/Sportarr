@@ -694,6 +694,9 @@ namespace Sportarr.Api.Migrations
                     b.Property<int>("EventId")
                         .HasColumnType("INTEGER");
 
+                    b.Property<DateTime?>("FailedAt")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("GrabCategory")
                         .HasColumnType("TEXT");
 
@@ -717,6 +720,9 @@ namespace Sportarr.Api.Migrations
 
                     b.Property<bool>("IsPack")
                         .HasColumnType("INTEGER");
+
+                    b.Property<DateTime?>("LastProgressAt")
+                        .HasColumnType("TEXT");
 
                     b.Property<DateTime?>("LastUpdate")
                         .HasColumnType("TEXT");
@@ -1215,6 +1221,9 @@ namespace Sportarr.Api.Migrations
                         .HasColumnType("INTEGER");
 
                     b.Property<bool>("HasFile")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool?>("HasLaterSeasonFinal")
                         .HasColumnType("INTEGER");
 
                     b.Property<string>("HomeScore")
@@ -2304,6 +2313,10 @@ namespace Sportarr.Api.Migrations
                         .HasColumnType("TEXT")
                         .HasAnnotation("Relational:JsonPropertyName", "strSport");
 
+                    b.Property<string>("SportFormat")
+                        .HasColumnType("TEXT")
+                        .HasAnnotation("Relational:JsonPropertyName", "strSportFormat");
+
                     b.Property<string>("Tags")
                         .IsRequired()
                         .HasColumnType("TEXT");
@@ -2385,6 +2398,9 @@ namespace Sportarr.Api.Migrations
                         .HasColumnType("INTEGER");
 
                     b.Property<bool>("CreateEventFolders")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("CreateEventTypeFolders")
                         .HasColumnType("INTEGER");
 
                     b.Property<bool>("CreateLeagueFolders")
@@ -2733,6 +2749,9 @@ namespace Sportarr.Api.Migrations
 
                     b.Property<string>("InfoUrl")
                         .HasColumnType("TEXT");
+
+                    b.Property<bool?>("IsPack")
+                        .HasColumnType("INTEGER");
 
                     b.Property<string>("Language")
                         .HasColumnType("TEXT");
@@ -3291,7 +3310,7 @@ namespace Sportarr.Api.Migrations
                         {
                             Id = 1,
                             CutoffQuality = 15,
-                            FormatItems = "[{\"Id\":0,\"FormatId\":1,\"Format\":null,\"Score\":-10000},{\"Id\":0,\"FormatId\":2,\"Format\":null,\"Score\":-10000},{\"Id\":0,\"FormatId\":3,\"Format\":null,\"Score\":5},{\"Id\":0,\"FormatId\":4,\"Format\":null,\"Score\":-10000},{\"Id\":0,\"FormatId\":5,\"Format\":null,\"Score\":-10000},{\"Id\":0,\"FormatId\":6,\"Format\":null,\"Score\":0},{\"Id\":0,\"FormatId\":7,\"Format\":null,\"Score\":10}]",
+                            FormatItems = "[{\"Id\":0,\"FormatId\":1,\"Format\":null,\"Score\":0},{\"Id\":0,\"FormatId\":2,\"Format\":null,\"Score\":0},{\"Id\":0,\"FormatId\":3,\"Format\":null,\"Score\":0},{\"Id\":0,\"FormatId\":4,\"Format\":null,\"Score\":0},{\"Id\":0,\"FormatId\":5,\"Format\":null,\"Score\":0},{\"Id\":0,\"FormatId\":6,\"Format\":null,\"Score\":0},{\"Id\":0,\"FormatId\":7,\"Format\":null,\"Score\":0}]",
                             FormatScoreIncrement = 1,
                             IsCustomized = false,
                             IsDefault = true,
@@ -3305,7 +3324,7 @@ namespace Sportarr.Api.Migrations
                         {
                             Id = 2,
                             CutoffQuality = 19,
-                            FormatItems = "[{\"Id\":0,\"FormatId\":1,\"Format\":null,\"Score\":-10000},{\"Id\":0,\"FormatId\":2,\"Format\":null,\"Score\":-10000},{\"Id\":0,\"FormatId\":3,\"Format\":null,\"Score\":5},{\"Id\":0,\"FormatId\":4,\"Format\":null,\"Score\":-10000},{\"Id\":0,\"FormatId\":5,\"Format\":null,\"Score\":-10000},{\"Id\":0,\"FormatId\":6,\"Format\":null,\"Score\":0},{\"Id\":0,\"FormatId\":7,\"Format\":null,\"Score\":10}]",
+                            FormatItems = "[{\"Id\":0,\"FormatId\":1,\"Format\":null,\"Score\":0},{\"Id\":0,\"FormatId\":2,\"Format\":null,\"Score\":0},{\"Id\":0,\"FormatId\":3,\"Format\":null,\"Score\":0},{\"Id\":0,\"FormatId\":4,\"Format\":null,\"Score\":0},{\"Id\":0,\"FormatId\":5,\"Format\":null,\"Score\":0},{\"Id\":0,\"FormatId\":6,\"Format\":null,\"Score\":0},{\"Id\":0,\"FormatId\":7,\"Format\":null,\"Score\":0}]",
                             FormatScoreIncrement = 1,
                             IsCustomized = false,
                             IsDefault = false,

@@ -154,6 +154,108 @@ public class EventRetentionServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task RunRetentionPassAsync_RecyclesSubtitleWhenVideoIsAlreadyMissing()
+    {
+        var videoPath = Path.Combine(_tempDataPath, "missing-game.mkv");
+        var subtitlePath = Path.Combine(_tempDataPath, "missing-game.en.srt");
+        var recycleBin = Path.Combine(_tempDataPath, "recycle");
+        Directory.CreateDirectory(recycleBin);
+        await File.WriteAllTextAsync(subtitlePath, "subtitle");
+        using (var scope = _provider.CreateScope())
+        {
+            var configService = scope.ServiceProvider.GetRequiredService<ConfigService>();
+            await configService.UpdateConfigAsync(config => config.RecycleBin = recycleBin);
+        }
+        await SeedAsync(db =>
+        {
+            db.Leagues.Add(MakeLeague(1, retentionDays: 30));
+            db.Events.Add(new Event
+            {
+                Id = 1, LeagueId = 1, Title = "Missing Game", Sport = "Basketball",
+                Monitored = true, HasFile = true, EventDate = DateTime.UtcNow.AddDays(-100)
+            });
+            db.EventFiles.Add(new EventFile
+            {
+                Id = 1, EventId = 1, FilePath = videoPath, Quality = "1080p"
+            });
+        });
+
+        (await CreateService().RunRetentionPassAsync(CancellationToken.None)).Should().Be(1);
+
+        File.Exists(subtitlePath).Should().BeFalse();
+        var recycledSubtitle = Directory.GetFiles(recycleBin, "*_missing-game.en.srt")
+            .Should().ContainSingle().Subject;
+        File.ReadAllText(recycledSubtitle).Should().Be("subtitle");
+    }
+
+    [Fact]
+    public async Task RunRetentionPassAsync_ReopensMissingPartWhenAnotherFileCannotBeDeleted()
+    {
+        var mainCardPath = Path.Combine(_tempDataPath, "main-card.mkv");
+        var protectedFolder = Path.Combine(_tempDataPath, "protected");
+        var prelimsPath = OperatingSystem.IsLinux()
+            ? "/proc/self/status"
+            : Path.Combine(protectedFolder, "prelims.mkv");
+        await File.WriteAllTextAsync(mainCardPath, "main card");
+        if (!OperatingSystem.IsLinux())
+        {
+            Directory.CreateDirectory(protectedFolder);
+            await File.WriteAllTextAsync(prelimsPath, "prelims");
+        }
+
+        FileStream? lockedFile = null;
+        try
+        {
+            if (OperatingSystem.IsWindows())
+                lockedFile = new FileStream(prelimsPath, FileMode.Open, FileAccess.Read, FileShare.None);
+            else if (!OperatingSystem.IsLinux())
+                File.SetUnixFileMode(protectedFolder, UnixFileMode.UserRead | UnixFileMode.UserExecute
+                    | UnixFileMode.GroupRead | UnixFileMode.GroupExecute
+                    | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+
+            await SeedAsync(db =>
+            {
+                db.Leagues.Add(new League
+                {
+                    Id = 1, Name = "UFC", Sport = "Fighting", RetentionDays = 30,
+                    MonitoredParts = "Main Card,Prelims"
+                });
+                db.Events.Add(new Event
+                {
+                    Id = 1, LeagueId = 1, Title = "UFC 9999", Sport = "Fighting",
+                    Monitored = true, HasFile = true, FilePath = mainCardPath,
+                    FileSize = 9, Quality = "1080p", EventDate = DateTime.UtcNow.AddDays(-100)
+                });
+                db.EventFiles.AddRange(
+                    new EventFile { Id = 1, EventId = 1, FilePath = mainCardPath,
+                        PartName = "Main Card", PartNumber = 3, Exists = true },
+                    new EventFile { Id = 2, EventId = 1, FilePath = prelimsPath,
+                        PartName = "Prelims", PartNumber = 2, Exists = true });
+            });
+
+            var processed = await CreateService().RunRetentionPassAsync(CancellationToken.None);
+
+            processed.Should().Be(1);
+            File.Exists(mainCardPath).Should().BeFalse();
+            File.Exists(prelimsPath).Should().BeTrue();
+            using var db = await OpenDbAsync();
+            var evt = (await db.Events.FindAsync(1))!;
+            evt.Monitored.Should().BeFalse();
+            evt.HasFile.Should().BeFalse();
+            evt.FilePath.Should().Be(prelimsPath);
+            (await db.EventFiles.Where(f => f.EventId == 1).ToListAsync())
+                .Should().ContainSingle().Which.PartName.Should().Be("Prelims");
+        }
+        finally
+        {
+            lockedFile?.Dispose();
+            if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux())
+                File.SetUnixFileMode(protectedFolder, UnixFileMode.UserRead | UnixFileMode.UserWrite
+                    | UnixFileMode.UserExecute);
+        }
+    }
+
+    [Fact]
     public async Task RunRetentionPassAsync_LeavesRecentEventsAlone()
     {
         await SeedAsync(db =>

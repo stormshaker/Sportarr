@@ -24,13 +24,14 @@ import {
   SignalIcon,
   ArrowRightOnRectangleIcon,
 } from '@heroicons/react/24/outline';
-import { Suspense, useState, useEffect } from 'react';
+import { Suspense, useState, useEffect, useRef } from 'react';
 import FooterStatusBar from './FooterStatusBar';
 import MobileTabBar from './MobileTabBar';
 import OnboardingWizard from './OnboardingWizard';
-import { useAuth } from '../contexts/useAuth';
+import { useAuth } from '../contexts/AuthContext';
 import { SETTINGS_PAGES } from '../pages/settings/settingsPages';
 import { useResolvedTheme } from '../hooks/useTheme';
+import { useIsDesktopLayout } from '../hooks/useCompactView';
 
 interface MenuItem {
   label: string;
@@ -52,6 +53,7 @@ function PageFallback() {
 
 export default function Layout() {
   const location = useLocation();
+  const wideScreen = useIsDesktopLayout();
   const navPath = useNavTarget();
   // The lockup is a flat image, so it cannot pick up the palette the way
   // text does. Each theme gets the artwork drawn in its own ink.
@@ -68,6 +70,8 @@ export default function Layout() {
   // First-run setup guide: show it once when the install isn't set up yet and
   // the user hasn't dismissed it. Runs once when the shell mounts.
   const [showOnboarding, setShowOnboarding] = useState(false);
+  const [isFirstRunGuide, setIsFirstRunGuide] = useState(false);
+  const manualGuideOpenedRef = useRef(false);
   useEffect(() => {
     if (localStorage.getItem('sportarr.onboardingDismissed') === '1') return;
     let cancelled = false;
@@ -78,7 +82,11 @@ export default function Layout() {
         const status = await res.json();
         // The server remembers a dismissal, so a guide closed on one machine
         // stays closed on every other machine and browser.
-        if (!cancelled && status && status.isReady === false && status.dismissed !== true) {
+        if (!cancelled && !manualGuideOpenedRef.current && status
+          && status.isReady === false && status.dismissed !== true) {
+          setIsFirstRunGuide(!status.hasRootFolder && !status.hasDownloadClient
+            && !status.hasEnabledIndexer && !status.hasIptvSource
+            && status.monitoredLeagueCount === 0);
           setShowOnboarding(true);
         }
       } catch {
@@ -92,7 +100,11 @@ export default function Layout() {
   // regardless of the dismissed flag or how configured the install is -
   // the guide hydrates from current settings and shows what's already set.
   useEffect(() => {
-    const open = () => setShowOnboarding(true);
+    const open = () => {
+      manualGuideOpenedRef.current = true;
+      setIsFirstRunGuide(false);
+      setShowOnboarding(true);
+    };
     window.addEventListener('sportarr:open-setup-guide', open);
     return () => window.removeEventListener('sportarr:open-setup-guide', open);
   }, []);
@@ -142,11 +154,10 @@ export default function Layout() {
       activeIcon: SignalSolidIcon,
       path: '/iptv',
       children: [
-        { label: 'Sources', path: '/iptv/sources' },
+        { label: 'Guide', path: '/iptv/guide' },
         { label: 'Channels', path: '/iptv/channels' },
-        { label: 'TV Guide', path: '/iptv/guide' },
         { label: 'Recordings', path: '/iptv/recordings' },
-        { label: 'DVR Settings', path: '/iptv/dvr-settings' },
+        { label: 'Options', path: '/iptv/settings' },
       ],
     },
     {
@@ -226,6 +237,14 @@ export default function Layout() {
     }
   };
 
+  const isActive = (path?: string, children?: { path: string }[]) => {
+    if (path) return navPath === path || navPath.startsWith(`${path}/`);
+    if (children) {
+      return children.some((child) => navPath === child.path || navPath.startsWith(`${child.path}/`));
+    }
+    return false;
+  };
+
   // Auto-collapse dropdowns when navigating to a different top-level section (like Sonarr)
   useEffect(() => {
     // Find which top-level menu section the current path belongs to
@@ -234,7 +253,9 @@ export default function Layout() {
       if (item.path && location.pathname === item.path) return true;
       // Check if current path matches any of the item's children
       if (item.children) {
-        return item.children.some((child) => location.pathname === child.path);
+        return item.children.some((child) =>
+          location.pathname === child.path || location.pathname.startsWith(`${child.path}/`)
+        );
       }
       return false;
     });
@@ -255,11 +276,17 @@ export default function Layout() {
        collapses; browsers without dvh ignore the invalid inline value and fall
        back to the h-screen class. With plain 100vh the shell was taller than
        the visible area on mobile, so the document gained its own scroll on
-       top of <main>'s - the "swipe twice to reach the ends" bug. */
-    <div className="flex flex-col md:flex-row h-screen bg-black text-gray-100" style={{ height: '100dvh' }}>
+       top of <main>'s - the "swipe twice to reach the ends" bug.
+
+       The sidebar is 256px wide, which a tablet cannot spare. It left the
+       month calendar about 500px for a grid that needs 900, so three days of
+       the week sat off the right edge behind a scroll with no scrollbar to
+       hint at them. Tablets therefore use the navigation phones use, and the
+       sidebar returns at xl where there is room for both. */
+    <div className="flex flex-col xl:flex-row h-screen bg-black text-gray-100" style={{ height: '100dvh' }}>
       {/* Mobile Header - Only visible on small screens */}
       <div
-        className="relative flex-none md:hidden bg-gradient-to-r from-gray-900 to-black border-b border-red-900/30"
+        className="relative flex-none xl:hidden bg-gradient-to-r from-gray-900 to-black border-b border-red-900/30"
         style={{ paddingTop: 'env(safe-area-inset-top)' }}
       >
         {/* Brand + settings gear. The gear opens a pill menu of the settings
@@ -312,14 +339,14 @@ export default function Layout() {
 
       {/* Backdrop for the settings pill - tap anywhere else to close */}
       {settingsMenuOpen && (
-        <div className="fixed inset-0 z-40 md:hidden" onClick={() => setSettingsMenuOpen(false)} />
+        <div className="fixed inset-0 z-40 xl:hidden" onClick={() => setSettingsMenuOpen(false)} />
       )}
 
       {/* Sidebar - desktop only. Phones cover every destination via the tab
           bar's pill menus plus the top bar's settings gear; there is no drawer. */}
-      <aside className="hidden md:flex md:relative inset-y-0 left-0 z-40 w-64 bg-gradient-to-b from-gray-900 to-black border-r border-red-900/30 flex-col">
+      <aside className="hidden xl:flex xl:relative inset-y-0 left-0 z-40 w-64 bg-gradient-to-b from-gray-900 to-black border-r border-red-900/30 flex-col">
         {/* Logo - Hidden on mobile (shown in header instead) */}
-        <div className="hidden md:block p-4 border-b border-red-900/30">
+        <div className="hidden xl:block p-4 border-b border-red-900/30">
           <Link to="/leagues" onClick={cleanupInertAttributes} className="block">
             <img
               src={getImageUrl(lockupFile)}
@@ -350,7 +377,9 @@ export default function Layout() {
                       chip
                         icon={item.icon}
                         activeIcon={item.activeIcon}
-                        active={item.children.some((child) => navPath === child.path)}
+                        active={item.children.some((child) =>
+                          navPath === child.path || navPath.startsWith(`${child.path}/`)
+                        )}
                       />
                       <span>{item.label}</span>
                     </div>
@@ -370,7 +399,7 @@ export default function Layout() {
                           onMouseEnter={() => preloadRoute(child.path)}
                           onFocus={() => preloadRoute(child.path)}
                           className={`block px-4 py-2.5 pl-12 text-sm transition-colors ${
-                            navPath === child.path
+                            navPath === child.path || navPath.startsWith(`${child.path}/`)
                               ? 'bg-red-900/30 text-white border-l-4 border-red-600'
                               : 'text-gray-400 hover:bg-red-900/10 hover:text-white'
                           }`}
@@ -415,7 +444,7 @@ export default function Layout() {
         </nav>
 
         {/* Sonarr-style status bar (inside sidebar) */}
-        <FooterStatusBar />
+        {wideScreen && <FooterStatusBar />}
 
         {/* Logout button - only show when auth is enabled */}
         {!isAuthDisabled && (
@@ -465,7 +494,7 @@ export default function Layout() {
           `<main>` is the actual scroll container for the app shell,
           so the gutter has to be reserved here too. */}
       <main
-        className="flex-1 overflow-y-auto [touch-action:pan-y_pinch-zoom] bg-gradient-to-br from-gray-950 via-black to-gray-950 pb-[calc(4.5rem+env(safe-area-inset-bottom))] md:pb-0"
+        className="min-w-0 flex-1 overflow-y-auto [touch-action:pan-y_pinch-zoom] bg-gradient-to-br from-gray-950 via-black to-gray-950 pb-[calc(4.5rem+env(safe-area-inset-bottom))] xl:pb-0"
         style={{ scrollbarGutter: 'stable' }}
       >
         <HealthBanner />
@@ -483,6 +512,7 @@ export default function Layout() {
         <OnboardingWizard
           onClose={() => setShowOnboarding(false)}
           onComplete={() => setShowOnboarding(false)}
+          isFirstRunGuide={isFirstRunGuide}
         />
       )}
     </div>

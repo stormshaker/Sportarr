@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Sportarr.Api.Data;
@@ -34,6 +35,7 @@ app.MapGet("/api/dvr/stats", async (SportarrDbContext db) =>
         recordingCount = recordings.Count(r => r.Status == DvrRecordingStatus.Recording),
         completedCount = recordings.Count(r => r.Status == DvrRecordingStatus.Completed),
         importedCount = recordings.Count(r => r.Status == DvrRecordingStatus.Imported),
+        importingCount = recordings.Count(r => r.Status == DvrRecordingStatus.Importing),
         failedCount = recordings.Count(r => r.Status == DvrRecordingStatus.Failed),
         cancelledCount = recordings.Count(r => r.Status == DvrRecordingStatus.Cancelled),
         // Bytes sitting in the DVR folders, and only those. Recordings are a
@@ -195,6 +197,25 @@ app.MapPut("/api/dvr/recordings/{id:int}", async (int id, ScheduleDvrRecordingRe
         return Results.BadRequest(new { error = ex.Message });
     }
 }).WithRequestValidation<ScheduleDvrRecordingRequest>();
+
+app.MapPatch("/api/dvr/recordings/{id:int}/assignment", async (
+    int id, DvrAssignmentPatchRequest request, [FromServices] DvrAssignmentService assignmentService,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var result = await assignmentService.UpdateAsync(id, request, cancellationToken);
+        return result == null ? Results.NotFound() : Results.Ok(result);
+    }
+    catch (DvrAssignmentConflictException ex)
+    {
+        return Results.Conflict(new { error = ex.Message });
+    }
+    catch (ArgumentException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+}).WithRequestValidation<DvrAssignmentPatchRequest>();
 
 // Delete a recording (defaults to deleting the file on disk too)
 app.MapDelete("/api/dvr/recordings/{id:int}", async (int id, DvrRecordingService dvrService, bool? deleteFile) =>
@@ -630,6 +651,8 @@ app.MapGet("/api/dvr/settings", async (ConfigService configService) =>
         postRecordingCommand = config.DvrPostRecordingCommand,
         overtimeGuardEnabled = config.DvrOvertimeGuardEnabled,
         overtimeMaxExtensionMinutes = config.DvrOvertimeMaxExtensionMinutes,
+        earlyFinishGuardEnabled = config.DvrEarlyFinishGuardEnabled,
+        earlyFinishBufferMinutes = Math.Clamp(config.DvrEarlyFinishBufferMinutes, 0, 60),
         reresolveChannelsEnabled = config.DvrReresolveChannelsEnabled,
         reresolveLockMinutes = config.DvrReresolveLockMinutes,
         reresolveMinImprovement = config.DvrReresolveMinImprovement,
@@ -659,7 +682,28 @@ app.MapPut("/api/dvr/settings", async (HttpRequest request, ConfigService config
 {
     using var reader = new StreamReader(request.Body);
     var json = await reader.ReadToEndAsync();
-    var settings = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(json);
+    JsonElement settings;
+    try
+    {
+        settings = JsonSerializer.Deserialize<JsonElement>(json);
+    }
+    catch (JsonException)
+    {
+        return Results.BadRequest(new { error = "DVR settings must be a JSON object." });
+    }
+
+    if (settings.ValueKind != JsonValueKind.Object)
+        return Results.BadRequest(new { error = "DVR settings must be a JSON object." });
+
+    var hasEarlyFinishGuard = settings.TryGetProperty("earlyFinishGuardEnabled", out var earlyFinishGuard);
+    if (hasEarlyFinishGuard && earlyFinishGuard.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+        return Results.BadRequest(new { error = "earlyFinishGuardEnabled must be a boolean." });
+
+    var hasEarlyFinishBuffer = settings.TryGetProperty("earlyFinishBufferMinutes", out var earlyFinishBuffer);
+    var earlyFinishBufferMinutes = 0;
+    if (hasEarlyFinishBuffer && (earlyFinishBuffer.ValueKind != JsonValueKind.Number ||
+        !earlyFinishBuffer.TryGetInt32(out earlyFinishBufferMinutes)))
+        return Results.BadRequest(new { error = "earlyFinishBufferMinutes must be an integer." });
 
     var config = await configService.GetConfigAsync();
 
@@ -710,6 +754,11 @@ app.MapPut("/api/dvr/settings", async (HttpRequest request, ConfigService config
 
     if (settings.TryGetProperty("overtimeMaxExtensionMinutes", out var overtimeMaxExtensionMinutes))
         config.DvrOvertimeMaxExtensionMinutes = Math.Clamp(overtimeMaxExtensionMinutes.GetInt32(), 0, 360);
+
+    if (hasEarlyFinishGuard)
+        config.DvrEarlyFinishGuardEnabled = earlyFinishGuard.GetBoolean();
+    if (hasEarlyFinishBuffer)
+        config.DvrEarlyFinishBufferMinutes = Math.Clamp(earlyFinishBufferMinutes, 0, 60);
 
     if (settings.TryGetProperty("reresolveChannelsEnabled", out var reresolveEnabled))
         config.DvrReresolveChannelsEnabled = reresolveEnabled.GetBoolean();

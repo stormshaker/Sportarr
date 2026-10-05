@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import {
@@ -12,11 +12,14 @@ import {
   SparklesIcon,
   LockClosedIcon,
   ExclamationTriangleIcon,
+  InformationCircleIcon,
 } from '@heroicons/react/24/outline';
-import { useAuth } from '../contexts/useAuth';
+import { useAuth } from '../contexts/AuthContext';
 import apiClient from '../api/client';
 import FileBrowserModal from './FileBrowserModal';
-import { errorMessage } from '../utils/errors';
+import { toApiIndexer } from '../utils/indexerPayload';
+import { NAMING_CONTEXT_PANEL, NAMING_GUIDANCE, OPTION_CARD_SELECTED, OPTION_CARD_UNSELECTED } from '../utils/designTokens';
+import { getNamingWarning, NAMING_CONTEXT_TEXT, renderNamingExample } from '../utils/namingGuidance';
 
 /**
  * First-run setup guide. Walks a new install from nothing to a working setup in
@@ -30,6 +33,7 @@ import { errorMessage } from '../utils/errors';
 interface OnboardingWizardProps {
   onClose: () => void;
   onComplete: () => void;
+  isFirstRunGuide?: boolean;
 }
 
 // Steps are assembled from the source selection: both acquisition paths can
@@ -41,7 +45,7 @@ function buildSteps(wantsDownload: boolean, wantsIptv: boolean): { key: string; 
     { key: 'security', title: 'Security' },
     { key: 'welcome', title: 'Sources' },
     { key: 'root', title: 'Library' },
-    { key: 'quality', title: 'Quality' },
+    { key: 'quality', title: 'Preferences' },
   ];
   if (wantsDownload) {
     steps.push({ key: 'client', title: 'Downloader' });
@@ -91,35 +95,6 @@ const APP_STEPS: Record<string, string[]> = {
   ],
 };
 
-interface SampleScore {
-  title: string;
-  quality: string;
-  customFormatScore: number;
-  matchedFormats: { name: string; score: number }[];
-  accepted: boolean;
-  /** Why a sample is skipped ("WEBDL-2160p not in this profile"). */
-  reason?: string | null;
-}
-
-// The example filename shown under the naming preset picker. Token values
-// match the preview in Settings > Media Management so both screens teach
-// the same thing.
-function renderNamingExample(format: string): string {
-  return (
-    format
-      .replace(/{Series}/g, 'MMA League')
-      .replace(/{Season}/g, 's2026')
-      .replace(/{Episode}/g, 'e12')
-      .replace(/{Part}/g, ' - pt3')
-      .replace(/{Event Title}/g, 'Event 100 Main Event')
-      .replace(/{League}/g, 'MMA League')
-      .replace(/{Event Date}/g, '2026-11-16')
-      .replace(/{Quality Full}/g, 'WEBDL-1080p')
-      .replace(/{Sportarr Id}/g, 'sportarr-ev-2338110')
-      .replace(/{Release Group}/g, 'GROUP') + '.mkv'
-  );
-}
-
 // Order the naming presets with the recommended full-details preset first so
 // it reads as the default it actually is.
 function orderNamingPresets(keys: string[], presets: Record<string, { description: string }>): string[] {
@@ -138,60 +113,7 @@ const CLIENT_TYPES = [
   { value: 6, label: 'NZBGet', port: 6789, auth: 'userpass', protocol: 'usenet' },
 ] as const;
 
-// The wizard reads a handful of fields back off records the API returns, to
-// repopulate its forms when you edit an entry. These describe exactly that
-// subset — the API sends a great deal more per record, and restating the whole
-// surface here would duplicate the settings pages and go stale the moment
-// either side gains a field.
-
-interface OnboardingStatus {
-  hasRootFolder?: boolean;
-  hasDownloadClient?: boolean;
-  hasEnabledIndexer?: boolean;
-  hasIptvSource?: boolean;
-}
-
-// Both are JSON blobs the API hands over as strings for the client to parse.
-interface SettingsResponse {
-  securitySettings?: string;
-  mediaManagementSettings?: string;
-}
-
-interface RootFolderSummary {
-  path?: string;
-}
-
-interface SavedDownloadClient {
-  id: number;
-  name?: string;
-  type?: number;
-  host?: string;
-  port?: number;
-  username?: string;
-  password?: string;
-  apiKey?: string;
-}
-
-interface SavedIndexer {
-  id: number;
-  name?: string;
-  protocol?: string;
-  // Older records carry url; newer ones baseUrl. Both are read.
-  baseUrl?: string;
-  url?: string;
-  apiKey?: string;
-}
-
-interface SavedIptvSource {
-  id: number;
-  name?: string;
-  type?: string;
-  url?: string;
-  username?: string;
-  password?: string;
-}
-
-export default function OnboardingWizard({ onClose, onComplete }: OnboardingWizardProps) {
+export default function OnboardingWizard({ onClose, onComplete, isFirstRunGuide = false }: OnboardingWizardProps) {
   const navigate = useNavigate();
   const { login } = useAuth();
 
@@ -223,9 +145,10 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
   const [rpHost, setRpHost] = useState('');
   const [rpRemote, setRpRemote] = useState('');
   const [rpLocal, setRpLocal] = useState('');
-  // Naming: default to the most detailed preset; user can pick another.
   const [namingPresets, setNamingPresets] = useState<Record<string, { format: string; description: string }>>({});
-  const [namingKey, setNamingKey] = useState<string>('');
+  const [namingChoice, setNamingChoice] = useState<string | null>(null);
+  const [namingContextLoaded, setNamingContextLoaded] = useState(false);
+  const [namingPresetsLoaded, setNamingPresetsLoaded] = useState(false);
 
   // Download client form plus the list already saved (this session or
   // before), each entry editable so a typo doesn't require Settings.
@@ -242,7 +165,7 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
   const [dcPass, setDcPass] = useState('');
   const [dcApiKey, setDcApiKey] = useState('');
   const [dcTest, setDcTest] = useState<{ ok: boolean; msg: string } | null>(null);
-  const [addedClients, setAddedClients] = useState<{ id: number; label: string; raw: SavedDownloadClient }[]>([]);
+  const [addedClients, setAddedClients] = useState<{ id: number; label: string; raw: any }[]>([]);
   const [editingClientId, setEditingClientId] = useState<number | null>(null);
 
   // Indexer form plus the editable list of saved indexers. The API key is
@@ -252,8 +175,10 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
   const [ixUrl, setIxUrl] = useState('');
   const [ixApiKey, setIxApiKey] = useState('');
   const [ixTest, setIxTest] = useState<{ ok: boolean; msg: string } | null>(null);
-  const [addedIndexers, setAddedIndexers] = useState<{ id: number; label: string; raw: SavedIndexer }[]>([]);
+  const [addedIndexers, setAddedIndexers] = useState<{ id: number; label: string; raw: any }[]>([]);
   const [editingIndexerId, setEditingIndexerId] = useState<number | null>(null);
+  const [ixOriginalImplementation, setIxOriginalImplementation] = useState<string | null>(null);
+  const [ixTypeChanged, setIxTypeChanged] = useState(false);
   const [sportarrApiKey, setSportarrApiKey] = useState('');
 
   // Existing-install awareness: when the guide is reopened on a configured
@@ -261,12 +186,7 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
   // settings and shows what's already in place instead of starting blank.
   const [hasExistingCreds, setHasExistingCreds] = useState(false);
   const [currentNamingFormat, setCurrentNamingFormat] = useState('');
-  // "Configured" means someone actually set this install up (root folder
-  // exists). Only then does the current naming format override the
-  // recommended default - on a fresh install the stored format is just the
-  // shipped default and must not beat the recommendation.
-  const [installConfigured, setInstallConfigured] = useState(false);
-
+  const [currentRenameEvents, setCurrentRenameEvents] = useState(false);
   // IPTV provider form plus the editable list of connected providers
   // (multiple providers are fully supported, same as the sources page).
   const [pName, setPName] = useState('');
@@ -276,15 +196,13 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
   const [pPass, setPPass] = useState('');
   const [pEpg, setPEpg] = useState('');
   const [channelCount, setChannelCount] = useState<number | null>(null);
-  const [addedProviders, setAddedProviders] = useState<{ id: number; label: string; raw: SavedIptvSource }[]>([]);
+  const [addedProviders, setAddedProviders] = useState<{ id: number; label: string; raw: any }[]>([]);
   const [editingProviderId, setEditingProviderId] = useState<number | null>(null);
 
-  // Quality: the two seeded, TRaSH-scored profiles. HD is the default.
-  const [qualityChoice, setQualityChoice] = useState<'hd' | '4k'>('hd');
-  const [hdProfileId, setHdProfileId] = useState<number | null>(null);
-  const [fourKProfileId, setFourKProfileId] = useState<number | null>(null);
-  const [qualitySamples, setQualitySamples] = useState<SampleScore[]>([]);
-  const [loadingSamples, setLoadingSamples] = useState(false);
+  const [releaseSetup, setReleaseSetup] = useState<'standard' | 'recommended' | null>('standard');
+  const [releaseSetupTouched, setReleaseSetupTouched] = useState(false);
+  const releaseSetupTouchedRef = useRef(false);
+  const [hasLegacyReleasePreferences, setHasLegacyReleasePreferences] = useState(false);
 
   // Hydrate from the current install so a reopened guide reflects reality:
   // sources selected from what exists, library path prefilled, existing
@@ -292,15 +210,14 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
   useEffect(() => {
     (async () => {
       try {
-        const { data: st } = await apiClient.get<OnboardingStatus>('/onboarding/status');
-        if (st?.hasRootFolder) setInstallConfigured(true);
+        const { data: st } = await apiClient.get<any>('/onboarding/status');
         if (st && (st.hasDownloadClient || st.hasEnabledIndexer || st.hasIptvSource)) {
           setWantsDownload(Boolean(st.hasDownloadClient || st.hasEnabledIndexer));
           setWantsIptv(Boolean(st.hasIptvSource));
         }
       } catch { /* fresh-install defaults stand */ }
       try {
-        const { data: settings } = await apiClient.get<SettingsResponse>('/settings');
+        const { data: settings } = await apiClient.get<any>('/settings');
         const security = JSON.parse(settings.securitySettings || '{}');
         const method = security.authenticationMethod;
         if (method === 'forms' || method === 'basic' || method === 'external') {
@@ -312,56 +229,47 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
         }
         const media = JSON.parse(settings.mediaManagementSettings || '{}');
         if (media.standardFileFormat) setCurrentNamingFormat(media.standardFileFormat);
+        setCurrentRenameEvents(media.renameEvents === true);
       } catch { /* defaults stand */ }
+      finally { setNamingContextLoaded(true); }
       try {
-        const { data: roots } = await apiClient.get<RootFolderSummary[]>('/rootfolder');
+        const { data: roots } = await apiClient.get<any[]>('/rootfolder');
         if (Array.isArray(roots) && roots.length > 0 && roots[0]?.path) setRootPath(roots[0].path);
       } catch { /* default path stands */ }
       try {
-        const { data: clients } = await apiClient.get<SavedDownloadClient[]>('/downloadclient');
+        const { data: clients } = await apiClient.get<any[]>('/downloadclient');
         if (Array.isArray(clients) && clients.length > 0) {
           setAddedClients(clients.map((c) => ({ id: c.id, label: `${c.name} (${c.host}:${c.port})`, raw: c })));
         }
       } catch { /* none listed */ }
       try {
-        const { data: ixs } = await apiClient.get<SavedIndexer[]>('/indexer');
+        const { data: ixs } = await apiClient.get<any[]>('/indexer');
         if (Array.isArray(ixs) && ixs.length > 0) {
-          setAddedIndexers(ixs.map((x) => ({ id: x.id, label: x.name ?? `Indexer ${x.id}`, raw: x })));
+          setAddedIndexers(ixs.map((x) => ({ id: x.id, label: x.name, raw: x })));
         }
       } catch { /* none listed */ }
       try {
-        const { data: sources } = await apiClient.get<SavedIptvSource[]>('/iptv/sources');
+        const { data: sources } = await apiClient.get<any[]>('/iptv/sources');
         if (Array.isArray(sources) && sources.length > 0) {
-          setAddedProviders(sources.map((s) => ({ id: s.id, label: s.name ?? `Provider ${s.id}`, raw: s })));
+          setAddedProviders(sources.map((s) => ({ id: s.id, label: s.name, raw: s })));
         }
       } catch { /* none listed */ }
     })();
   }, []);
 
-  // Pre-select the preset the install is already using - but only on a
-  // CONFIGURED install. A fresh database carries the shipped default
-  // format, and letting that beat the recommended preset is how "Plex
-  // Standard" ended up pre-selected on brand-new installs.
-  useEffect(() => {
-    if (!currentNamingFormat || !installConfigured) return;
-    const match = Object.entries(namingPresets).find(([, p]) => p.format === currentNamingFormat);
-    if (match) setNamingKey(match[0]);
-  }, [currentNamingFormat, namingPresets, installConfigured]);
-
-  // Find the seeded HD / 4K profiles by resolution in their name.
+  // Show the recommendation choice saved on an existing install.
   useEffect(() => {
     (async () => {
       try {
-        const { data } = await apiClient.get<{ id: number; name: string; isDefault: boolean }[]>('/qualityprofile');
-        const hd = data.find((p) => p.name.includes('1080p'));
-        const fourK = data.find((p) => p.name.includes('2160p'));
-        if (hd) setHdProfileId(hd.id);
-        if (fourK) setFourKProfileId(fourK.id);
-        // Default the choice to whichever is currently the default (HD out of the box).
-        if (fourK?.isDefault) setQualityChoice('4k');
-      } catch {
-        // Non-fatal: the quality step just won't show a preview.
-      }
+        const { data } = await apiClient.get<{ useRecommendedReleaseSettings?: boolean }>('/trash/settings');
+        if (data.useRecommendedReleaseSettings === true) {
+          if (!releaseSetupTouchedRef.current) setReleaseSetup('recommended');
+        }
+        if (data.useRecommendedReleaseSettings == null) {
+          if (!releaseSetupTouchedRef.current) setReleaseSetup(null);
+          setHasLegacyReleasePreferences(true);
+        }
+      } catch { /* The new-install choice remains Standard. */ }
     })();
   }, []);
 
@@ -374,35 +282,23 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
         );
         const file = data.file ?? {};
         setNamingPresets(file);
-        // Full-details preset first and selected by default; the picker
-        // renders in this same order so the recommendation is the top row.
-        const ordered = orderNamingPresets(Object.keys(file), file);
-        setNamingKey(ordered[0] ?? '');
       } catch {
         // Non-fatal: naming just won't be offered.
+      } finally {
+        setNamingPresetsLoaded(true);
       }
     })();
   }, []);
 
-  // Load the sample-score preview for the chosen profile.
-  const selectedProfileId = qualityChoice === '4k' ? fourKProfileId : hdProfileId;
-  useEffect(() => {
-    if (stepKey !== 'quality' || selectedProfileId == null) return;
-    let cancelled = false;
-    (async () => {
-      setLoadingSamples(true);
-      try {
-        const { data } = await apiClient.get<{ samples: SampleScore[] }>(`/qualityprofile/${selectedProfileId}/preview`);
-        if (!cancelled) setQualitySamples(data.samples ?? []);
-      } catch {
-        if (!cancelled) setQualitySamples([]);
-      } finally {
-        if (!cancelled) setLoadingSamples(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [selectedProfileId, stepKey]);
-
+  const stockNamingFormat = namingPresets['plex-standard']?.format === currentNamingFormat
+    || currentNamingFormat === '{Series} - {Season}{Episode}{Part} - {Event Title} - {Quality Full}';
+  const recommendedNamingKey = orderNamingPresets(Object.keys(namingPresets), namingPresets)[0] ?? '';
+  const namingKey = namingChoice ?? (isFirstRunGuide && stockNamingFormat ? recommendedNamingKey : '');
+  const shouldApplyNamingPreset = Boolean(namingKey);
+  const namingWarning = getNamingWarning(
+    shouldApplyNamingPreset ? namingPresets[namingKey]?.format ?? '' : currentNamingFormat,
+    shouldApplyNamingPreset || currentRenameEvents,
+  );
   const steps = buildSteps(wantsDownload, wantsIptv);
   const stepIndex = Math.max(0, steps.findIndex((s) => s.key === stepKey));
   const clientAuth = CLIENT_TYPES.find((c) => c.value === dcType)?.auth ?? 'userpass';
@@ -472,7 +368,7 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
     }
     setBusy(true);
     try {
-      const { data: settings } = await apiClient.get<SettingsResponse>('/settings');
+      const { data: settings } = await apiClient.get<any>('/settings');
       const security = JSON.parse(settings.securitySettings || '{}');
       security.authenticationMethod = authMethod;
       if (writingCredentials) {
@@ -491,8 +387,8 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
         }
       }
       return true;
-    } catch (err) {
-      toast.error('Could not save security settings', { description: errorMessage(err) });
+    } catch (err: any) {
+      toast.error('Could not save security settings', { description: err?.response?.data?.error || err?.message });
       return false;
     } finally {
       setBusy(false);
@@ -514,19 +410,50 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
     tags: [] as number[],
   });
 
-  const buildIndexerPayload = () => ({
-    name: ixName.trim() || (ixProtocol === 'usenet' ? 'Newznab' : 'Torznab'),
-    implementation: ixProtocol === 'usenet' ? 'Newznab' : 'Torznab',
-    protocol: ixProtocol,
-    enabled: true,
-    enableRss: true,
-    enableAutomaticSearch: true,
-    enableInteractiveSearch: true,
-    priority: 25,
-    baseUrl: ixUrl.trim(),
-    apiKey: ixApiKey.trim(),
-    categories: [] as number[],
-  });
+  const buildIndexerPayload = () => {
+    const selectedImplementation = ixProtocol === 'usenet' ? 'Newznab' : 'Torznab';
+    const implementation = editingIndexerId != null && !ixTypeChanged && ixOriginalImplementation
+      ? ixOriginalImplementation
+      : selectedImplementation;
+    const edited = toApiIndexer({
+      name: ixName.trim() || (ixProtocol === 'usenet' ? 'Newznab' : 'Torznab'),
+      implementation,
+      enabled: true,
+      enableRss: true,
+      enableAutomaticSearch: true,
+      enableInteractiveSearch: true,
+      priority: 25,
+      baseUrl: ixUrl.trim(),
+      apiKey: ixApiKey.trim(),
+      categories: [],
+    });
+    if (editingIndexerId == null) return edited;
+
+    const existing = addedIndexers.find((indexer) => indexer.id === editingIndexerId)?.raw;
+    if (!existing || !Array.isArray(existing.fields)) return { ...edited, id: editingIndexerId };
+
+    const editedFields = new Map(
+      edited.fields
+        .filter((field) => field.name === 'baseUrl' || field.name === 'apiKey')
+        .map((field) => [field.name, field.value]),
+    );
+    const fields = existing.fields.map((field: { name: string; value: string | string[] }) => (
+      editedFields.has(field.name)
+        ? { ...field, value: editedFields.get(field.name)! }
+        : field
+    ));
+    for (const [name, value] of editedFields) {
+      if (!fields.some((field: { name: string }) => field.name === name)) fields.push({ name, value });
+    }
+
+    return {
+      ...existing,
+      id: editingIndexerId,
+      name: edited.name,
+      implementation: edited.implementation,
+      fields,
+    };
+  };
 
   const testClient = async () => {
     setBusy(true);
@@ -539,8 +466,8 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
       // editing a field, and Save then walked past it and finished onboarding
       // with no client at all.
       setDcFormTouched(true);
-    } catch (err) {
-      setDcTest({ ok: false, msg: errorMessage(err, 'Could not connect') });
+    } catch (err: any) {
+      setDcTest({ ok: false, msg: err?.response?.data?.error || err?.message || 'Could not connect' });
     } finally {
       setBusy(false);
     }
@@ -552,8 +479,11 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
     try {
       await apiClient.post('/indexer/test', buildIndexerPayload());
       setIxTest({ ok: true, msg: 'Connected' });
-    } catch (err) {
-      setIxTest({ ok: false, msg: errorMessage(err, 'Could not connect') });
+    } catch (err: any) {
+      setIxTest({
+        ok: false,
+        msg: err?.response?.data?.message || err?.response?.data?.error || err?.message || 'Could not connect',
+      });
     } finally {
       setBusy(false);
     }
@@ -561,31 +491,26 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
 
   const saveQualityStep = async (): Promise<boolean> => {
     setBusy(true);
-    // Every failure here used to be swallowed and the step reported as done,
-    // so a user who picked 4K could go on to create leagues on the old HD
-    // default, and a naming change that never landed left imported files under
-    // a format that does not match reliably.
     const failures: string[] = [];
     try {
-      // 1) Make the chosen resolution the default profile.
-      const id = qualityChoice === '4k' ? fourKProfileId : hdProfileId;
-      if (id != null) {
-        try { await apiClient.post(`/qualityprofile/${id}/set-default`); }
-        catch (err) { failures.push(`quality profile (${errorMessage(err, 'unknown error')})`); }
-      }
-      // 2) Import the recommended TRaSH size limits.
-      try { await apiClient.post('/qualitydefinition/trash/import', {}); } catch { /* non-fatal */ }
-      // 3) Apply the chosen naming scheme (media-management file format).
-      const preset = namingPresets[namingKey];
-      if (preset?.format) {
+      if (releaseSetup && releaseSetupTouched) {
         try {
-          const { data: settings } = await apiClient.get<SettingsResponse>('/settings');
+          await apiClient.post('/onboarding/release-preferences', { mode: releaseSetup });
+        }
+        catch (err: any) {
+          failures.push(`release preferences (${err?.response?.data?.error || err?.message || 'unknown error'})`);
+        }
+      }
+      const preset = namingPresets[namingKey];
+      if (preset?.format && shouldApplyNamingPreset) {
+        try {
+          const { data: settings } = await apiClient.get<any>('/settings');
           const media = JSON.parse(settings.mediaManagementSettings || '{}');
           media.standardFileFormat = preset.format;
-          media.renameEpisodes = true;
+          media.renameEvents = true;
           await apiClient.put('/settings', { ...settings, mediaManagementSettings: JSON.stringify(media) });
-        } catch (err) {
-          failures.push(`file naming (${errorMessage(err, 'unknown error')})`);
+        } catch (err: any) {
+          failures.push(`file naming (${err?.response?.data?.error || err?.message || 'unknown error'})`);
         }
       }
 
@@ -612,8 +537,8 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
     try {
       try {
         await apiClient.post('/rootfolder', { path: trimmed });
-      } catch (err) {
-        const msg = errorMessage(err, 'Could not create the folder');
+      } catch (err: any) {
+        const msg = err?.response?.data?.error || err?.message || 'Could not create the folder';
         if (!String(msg).toLowerCase().includes('already')) {
           toast.error('Could not set up the library folder', { description: msg });
           return false;
@@ -627,9 +552,9 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
             remotePath: rpRemote.trim(),
             localPath: rpLocal.trim(),
           });
-        } catch (err) {
+        } catch (err: any) {
           toast.error('Library folder set, but the remote path mapping failed', {
-            description: errorMessage(err),
+            description: err?.response?.data?.error || err?.message,
           });
         }
       }
@@ -669,15 +594,13 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
           : c)));
         toast.success('Download client updated');
       } else {
-        const { data } = await apiClient.post<SavedDownloadClient>('/downloadclient', payload);
-        if (data?.id != null) {
-          setAddedClients((prev) => [...prev, { id: data.id, label: `${payload.name} (${payload.host}:${payload.port})`, raw: data }]);
-        }
+        const { data } = await apiClient.post<any>('/downloadclient', payload);
+        setAddedClients((prev) => [...prev, { id: data?.id, label: `${payload.name} (${payload.host}:${payload.port})`, raw: data ?? payload }]);
       }
       return true;
-    } catch (err) {
+    } catch (err: any) {
       toast.error('Could not save the download client', {
-        description: errorMessage(err),
+        description: err?.response?.data?.error || err?.message,
       });
       return false;
     } finally {
@@ -693,7 +616,7 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
     }
   };
 
-  const editClient = (entry: { id: number; raw: SavedDownloadClient }) => {
+  const editClient = (entry: { id: number; raw: any }) => {
     const c = entry.raw ?? {};
     setDcType(c.type ?? 0);
     setDcHost(c.host ?? '');
@@ -711,6 +634,8 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
     setIxApiKey('');
     setIxTest(null);
     setEditingIndexerId(null);
+    setIxOriginalImplementation(null);
+    setIxTypeChanged(false);
   };
 
   const saveIndexer = async (): Promise<boolean> => {
@@ -722,22 +647,19 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
     try {
       const payload = buildIndexerPayload();
       if (editingIndexerId != null) {
-        const existing = addedIndexers.find((x) => x.id === editingIndexerId);
-        const { data } = await apiClient.put(`/indexer/${editingIndexerId}`, { ...existing?.raw, ...payload, id: editingIndexerId });
+        const { data } = await apiClient.put(`/indexer/${editingIndexerId}`, payload);
         setAddedIndexers((prev) => prev.map((x) => (x.id === editingIndexerId
-          ? { id: editingIndexerId, label: payload.name, raw: data ?? { ...existing?.raw, ...payload } }
+          ? { id: editingIndexerId, label: payload.name, raw: data?.fields ? data : payload }
           : x)));
         toast.success('Indexer updated');
       } else {
-        const { data } = await apiClient.post<SavedIndexer>('/indexer', payload);
-        if (data?.id != null) {
-          setAddedIndexers((prev) => [...prev, { id: data.id, label: payload.name, raw: data }]);
-        }
+        const { data } = await apiClient.post<any>('/indexer', payload);
+        setAddedIndexers((prev) => [...prev, { id: data?.id, label: payload.name, raw: { ...payload, id: data?.id } }]);
       }
       return true;
-    } catch (err) {
+    } catch (err: any) {
       toast.error('Could not save the indexer', {
-        description: errorMessage(err),
+        description: err?.response?.data?.message || err?.response?.data?.error || err?.message,
       });
       return false;
     } finally {
@@ -753,12 +675,20 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
     }
   };
 
-  const editIndexer = (entry: { id: number; raw: SavedIndexer }) => {
+  const editIndexer = (entry: { id: number; raw: any }) => {
     const x = entry.raw ?? {};
-    setIxProtocol((x.protocol === 'torrent' ? 'torrent' : 'usenet'));
+    const fields = new Map<string, string | string[]>(
+      Array.isArray(x.fields)
+        ? x.fields.map((field: { name: string; value: string | string[] }) => [field.name, field.value])
+        : [],
+    );
+    const implementation = x.implementation ?? (x.type === 1 ? 'Newznab' : 'Torznab');
+    setIxProtocol(implementation === 'Newznab' ? 'usenet' : 'torrent');
+    setIxOriginalImplementation(implementation);
+    setIxTypeChanged(false);
     setIxName(x.name ?? '');
-    setIxUrl(x.baseUrl ?? x.url ?? '');
-    setIxApiKey(x.apiKey ?? '');
+    setIxUrl(String(fields.get('baseUrl') ?? x.baseUrl ?? x.url ?? ''));
+    setIxApiKey(String(fields.get('apiKey') ?? x.apiKey ?? ''));
     setIxTest(null);
     setEditingIndexerId(entry.id);
   };
@@ -772,7 +702,7 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
     setEditingProviderId(null);
   };
 
-  const editProvider = (entry: { id: number; raw: SavedIptvSource }) => {
+  const editProvider = (entry: { id: number; raw: any }) => {
     const s = entry.raw ?? {};
     setPName(s.name ?? '');
     setPType(s.type === 'Xtream' ? 'Xtream' : 'M3U');
@@ -835,9 +765,9 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
               });
             }
             await apiClient.post('/epg/auto-map');
-          } catch (guideErr) {
+          } catch (guideErr: any) {
             toast.warning('Provider updated, but the guide could not be saved', {
-              description: errorMessage(guideErr),
+              description: guideErr?.response?.data?.error || guideErr?.message,
             });
           }
         }
@@ -847,8 +777,8 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
           : p)));
         toast.success('Provider updated');
         return true;
-      } catch (err) {
-        toast.error('Could not update the provider', { description: errorMessage(err) });
+      } catch (err: any) {
+        toast.error('Could not update the provider', { description: err?.response?.data?.error || err?.message });
         return false;
       } finally {
         setBusy(false);
@@ -885,9 +815,9 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
       }
       setAddedProviders((prev) => [...prev, { id: source.id, label: body.name, raw: { ...body, id: source.id } }]);
       return true;
-    } catch (err) {
+    } catch (err: any) {
       toast.error('Could not connect the provider', {
-        description: errorMessage(err),
+        description: err?.response?.data?.error || err?.message,
       });
       return false;
     } finally {
@@ -963,9 +893,7 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
 
   // Advance to the next step without applying this step's settings. The user still
   // passes through every step, they just opt out of this one.
-  const skipStep = () => {
-    goTo(nextKey());
-  };
+  const skipStep = () => goTo(nextKey());
 
   const inputCls =
     'w-full rounded-lg border border-gray-700 bg-gray-800 px-4 py-2 text-white focus:border-red-600 focus:outline-none';
@@ -974,10 +902,9 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
       <div className="animate-wizard-modal flex max-h-[85dvh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-gray-800 bg-gray-950 shadow-2xl">
-        {/* Header + stepper. Numbered dots for every step, with the current
-            step's name shown so the row stays compact even with many steps. */}
+        {/* Keep the step count readable on narrow screens. */}
         <div className="flex items-center justify-between gap-4 border-b border-gray-800 px-6 py-4">
-          <div className="flex items-center gap-1.5">
+          <div className="hidden items-center gap-1.5 sm:flex">
             {steps.map((s, i) => (
               <div key={s.key} className="flex items-center gap-1.5">
                 <div
@@ -995,8 +922,11 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
               </div>
             ))}
           </div>
-          <span className="flex-shrink-0 text-sm font-medium text-white">
+          <span className="hidden flex-shrink-0 text-sm font-medium text-white sm:block">
             {steps[stepIndex]?.title}
+          </span>
+          <span className="text-sm font-medium text-white sm:hidden">
+            Step {stepIndex + 1} of {steps.length} · {steps[stepIndex]?.title}
           </span>
         </div>
 
@@ -1018,7 +948,7 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
                 {[
                   { icon: LockClosedIcon, label: 'Secure it' },
                   { icon: FolderIcon, label: 'Library folder' },
-                  { icon: SparklesIcon, label: 'Quality scoring' },
+                  { icon: SparklesIcon, label: 'Release setup' },
                   { icon: ServerIcon, label: 'Downloader / IPTV' },
                   { icon: MagnifyingGlassIcon, label: 'Indexer' },
                   { icon: CheckCircleIcon, label: 'Pick your sports' },
@@ -1238,97 +1168,74 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
 
           {stepKey === 'quality' && (
             <div>
-              <SparklesIcon className="mb-2 h-7 w-7 text-yellow-400" />
-              <h2 className="mb-1 text-2xl font-bold text-white">How good should your files be?</h2>
+              <SparklesIcon className="mb-2 h-7 w-7 text-red-500" />
+              <h2 className="mb-1 text-2xl font-bold text-white">Choose your release setup</h2>
               <p className="mb-4 text-sm text-gray-400">
-                Sportarr scores releases with TRaSH Guides formats so it grabs the good ones and skips
-                junk. Pick a target - you can change it any time.
+                Both 1080p and 4K profiles are ready. Sportarr starts with 1080p.
+                You can change it later in Settings.
               </p>
               <div className="mb-4 grid gap-3 sm:grid-cols-2">
                 <button
-                  onClick={() => setQualityChoice('hd')}
-                  className={`rounded-xl border p-4 text-left transition-colors ${
-                    qualityChoice === 'hd' ? 'border-red-500 bg-red-950/20' : 'border-gray-800 bg-gray-900 hover:border-gray-700'
-                  }`}
+                  type="button"
+                  aria-pressed={releaseSetup === 'standard'}
+                  onClick={() => { releaseSetupTouchedRef.current = true; setReleaseSetup('standard'); setReleaseSetupTouched(true); }}
+                  className={releaseSetup === 'standard' ? OPTION_CARD_SELECTED : OPTION_CARD_UNSELECTED}
                 >
-                  <div className="font-semibold text-white">HD - 1080p <span className="text-xs font-normal text-gray-400">(recommended)</span></div>
-                  <p className="mt-1 text-xs text-gray-400">Broadcast and streaming quality. What most sports releases are.</p>
+                  <div className="font-semibold text-white">Standard setup</div>
+                  <p className="mt-1 text-xs text-gray-400">Use built-in profiles. Fine-tune preferences later in Settings.</p>
                 </button>
                 <button
-                  onClick={() => setQualityChoice('4k')}
-                  className={`rounded-xl border p-4 text-left transition-colors ${
-                    qualityChoice === '4k' ? 'border-red-500 bg-red-950/20' : 'border-gray-800 bg-gray-900 hover:border-gray-700'
-                  }`}
+                  type="button"
+                  aria-pressed={releaseSetup === 'recommended'}
+                  onClick={() => { releaseSetupTouchedRef.current = true; setReleaseSetup('recommended'); setReleaseSetupTouched(true); }}
+                  className={releaseSetup === 'recommended' ? OPTION_CARD_SELECTED : OPTION_CARD_UNSELECTED}
                 >
-                  <div className="font-semibold text-white">4K - 2160p</div>
-                  <p className="mt-1 text-xs text-gray-400">Ultra HD when it's available, HD as a fallback.</p>
+                  <div className="font-semibold text-white">Recommended setup</div>
+                  <p className="mt-1 text-xs text-gray-400">Import TRaSH Guides scores and quality size limits.</p>
                 </button>
               </div>
-
+              {hasLegacyReleasePreferences && !releaseSetupTouched && (
+                <p className="mb-4 text-sm text-gray-400">
+                  Your current release preferences will stay in place unless you choose a setup above.
+                </p>
+              )}
               {Object.keys(namingPresets).length > 0 && (
                 <div className="mb-4">
-                  <label className={labelCls}>File naming</label>
-                  <select value={namingKey} onChange={(e) => setNamingKey(e.target.value)} className={inputCls}>
+                  <label htmlFor="onboarding-naming-preset" className={labelCls}>File naming (optional)</label>
+                  <select id="onboarding-naming-preset" value={namingKey} onChange={(e) => setNamingChoice(e.target.value)} className={inputCls}>
+                    <option value="">Keep current naming</option>
                     {orderNamingPresets(Object.keys(namingPresets), namingPresets).map((key, i) => (
                       <option key={key} value={key}>
-                        {key.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())}{i === 0 ? ' (recommended)' : ''}
+                        {key === 'original' ? 'Original Filename (check source)' : key.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())}{i === 0 ? ' (recommended)' : ''}
                       </option>
                     ))}
                   </select>
-                  {namingPresets[namingKey]?.description && (
-                    <p className="mt-1 text-xs text-gray-500">{namingPresets[namingKey].description}</p>
+                  {namingWarning && (
+                    <div role="alert" className={`mt-3 ${NAMING_GUIDANCE}`}>
+                      <ExclamationTriangleIcon className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" aria-hidden="true" />
+                      <p>{namingWarning}</p>
+                    </div>
                   )}
-                  {namingPresets[namingKey]?.format && (
+                  <div role="note" className={`mt-3 ${NAMING_CONTEXT_PANEL}`}>
+                    <InformationCircleIcon className="mt-0.5 h-4 w-4 shrink-0 text-gray-400" aria-hidden="true" />
+                    <p>{NAMING_CONTEXT_TEXT}</p>
+                  </div>
+                  <p className="mt-1 text-xs text-gray-500">
+                    {namingKey ? namingPresets[namingKey]?.description : 'Your current naming settings will stay in place.'}
+                  </p>
+                  {(namingKey ? namingPresets[namingKey]?.format : currentNamingFormat) && (
                     <div className="mt-2 rounded-lg border border-gray-800 bg-gray-900/60 p-3">
-                      <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-gray-500">Files will be named like</p>
+                      <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-gray-500">
+                        {namingKey ? 'Files will be named like' : 'Current format'}
+                      </p>
                       <p className="break-all font-mono text-xs text-gray-200">
-                        {renderNamingExample(namingPresets[namingKey].format)}
+                        {namingKey ? renderNamingExample(namingPresets[namingKey].format) : currentNamingFormat}
                       </p>
                     </div>
                   )}
                 </div>
               )}
 
-              <p className="mb-4 rounded-lg border border-gray-800 bg-gray-900/40 p-3 text-xs text-gray-400">
-                Save &amp; Next also imports the recommended <span className="text-gray-200">custom format scores</span>,{' '}
-                <span className="text-gray-200">size limits</span>, and this <span className="text-gray-200">naming scheme</span>.
-                These defaults are what the developers recommend for the best experience - you can change any of them in
-                Settings whenever you like.
-              </p>
-
-              <div className="rounded-lg border border-gray-800 bg-gray-900/60 p-4">
-                <div className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-500">How it scores sample releases</div>
-                {loadingSamples ? (
-                  <div className="flex items-center gap-2 text-sm text-gray-400"><ArrowPathIcon className="h-4 w-4 animate-spin" /> Scoring...</div>
-                ) : qualitySamples.length === 0 ? (
-                  <p className="text-xs text-gray-500">Preview unavailable right now.</p>
-                ) : (
-                  <div className="space-y-1.5">
-                    {qualitySamples.map((s, i) => (
-                      <div key={i} className="flex items-center justify-between gap-3 border-b border-gray-800/60 pb-1.5 last:border-0 last:pb-0">
-                        <div className="min-w-0">
-                          <div className="truncate text-xs text-gray-300">{s.title}</div>
-                          <div className="truncate text-[10px] text-gray-500">
-                            {s.quality}{s.matchedFormats.length ? ' · ' + s.matchedFormats.map((f) => f.name).slice(0, 3).join(', ') : ''}
-                          </div>
-                        </div>
-                        <div className="flex flex-shrink-0 items-center gap-2">
-                          <span className={`font-mono text-xs ${s.customFormatScore >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                            {s.customFormatScore > 0 ? '+' : ''}{s.customFormatScore}
-                          </span>
-                          <span
-                            className={`text-[10px] ${s.accepted ? 'text-green-400' : 'text-red-400'}`}
-                            title={s.reason ?? undefined}
-                          >
-                            {s.accepted ? '✓ grab' : `✕ skip${s.reason ? ` · ${s.reason}` : ''}`}
-                          </span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                <p className="mt-2 text-[10px] text-gray-600">Sample names are format examples only - no files or content involved.</p>
-              </div>
             </div>
           )}
 
@@ -1521,7 +1428,7 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
                     {(['usenet', 'torrent'] as const).map((p) => (
                       <button
                         key={p}
-                        onClick={() => { setIxProtocol(p); setIxTest(null); }}
+                        onClick={() => { setIxProtocol(p); setIxTypeChanged(true); setIxTest(null); }}
                         className={`flex-1 rounded-lg border px-4 py-2 text-sm capitalize transition-colors ${
                           ixProtocol === p ? 'border-red-500 bg-red-950/20 text-white' : 'border-gray-700 bg-gray-800 text-gray-300 hover:bg-gray-700'
                         }`}
@@ -1540,8 +1447,8 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
                   <input type="text" value={ixUrl} onChange={(e) => setIxUrl(e.target.value)} placeholder="https://indexer.example.com" className={inputCls} />
                 </div>
                 <div>
-                  <label className={labelCls}>API Key</label>
-                  <input type="text" value={ixApiKey} onChange={(e) => setIxApiKey(e.target.value)} className={inputCls} />
+                  <label htmlFor="onboarding-indexer-api-key" className={labelCls}>API Key</label>
+                  <input id="onboarding-indexer-api-key" type="text" value={ixApiKey} onChange={(e) => setIxApiKey(e.target.value)} className={inputCls} />
                 </div>
                 <div className="flex flex-wrap items-center gap-3">
                   <button onClick={testIndexer} disabled={busy} className="rounded-lg border border-gray-700 bg-gray-800 px-4 py-2 text-sm text-gray-200 transition-colors hover:bg-gray-700 disabled:opacity-50">
@@ -1835,7 +1742,7 @@ export default function OnboardingWizard({ onClose, onComplete }: OnboardingWiza
               </button>
               <button
                 onClick={goNext}
-                disabled={busy}
+                disabled={busy || (stepKey === 'quality' && (!namingContextLoaded || !namingPresetsLoaded))}
                 className="flex items-center gap-2 rounded-lg bg-red-600 px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-red-700 disabled:opacity-50"
               >
                 {busy && <ArrowPathIcon className="h-4 w-4 animate-spin" />}

@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Sportarr.Api.Data;
+using Sportarr.Api.Helpers;
 using Sportarr.Api.Models;
 
 namespace Sportarr.Api.Services;
@@ -29,15 +30,21 @@ public class DvrRecordingService
     // writing the same output file.
     private static readonly ConcurrentDictionary<int, byte> _startsInFlight = new();
 
-    // Overtime guard state. Total minutes each recording has been extended
-    // past its original end (caps runaway extension), and a short-lived
-    // per-league livescore cache so a scheduler tick with several
-    // recordings ending doesn't hammer the hub. Static: the service is
-    // scoped, the scheduler ticks in fresh scopes. Reset on app restart -
-    // worst case a restart mid-overtime grants a fresh extension budget.
+    // Scoped scheduler calls share the extension budget. Restarting resets it.
     private static readonly ConcurrentDictionary<int, int> _overtimeExtensions = new();
-    private static readonly ConcurrentDictionary<string, (DateTime FetchedAt, List<Event> Events)> _livescoreCache = new();
     private const int OvertimeStepMinutes = 10;
+
+    // A recorder that stops (naturally or via the watchdog's stall
+    // detection) within this fraction of the scheduled duration of the
+    // scheduled end is treated as a normal completion rather than a
+    // failure. Sports events routinely finish ahead of their scheduled
+    // window - a lopsided match called early, a weather delay that
+    // shortens play - and the upstream IPTV feed drops the channel the
+    // moment the broadcast ends, which looks identical to a dead stream
+    // from the byte-growth check alone. Relative rather than a flat grace
+    // period so a 5-minute highlights recording and a 4-hour cricket
+    // match get proportionate leeway.
+    private const double EarlyEndGraceFraction = 0.20;
 
     private readonly ILogger<DvrRecordingService> _logger;
     private readonly SportarrDbContext _db;
@@ -48,6 +55,8 @@ public class DvrRecordingService
     private readonly DiskSpaceService _diskSpaceService;
     private readonly NotificationService _notificationService;
     private readonly SportarrApiClient _sportarrApiClient;
+    private readonly EpisodeNumberResolver _episodeNumberResolver;
+    private readonly DvrEarlyFinishGuard _earlyFinishGuard;
 
     public DvrRecordingService(
         ILogger<DvrRecordingService> logger,
@@ -58,7 +67,9 @@ public class DvrRecordingService
         FileNamingService namingService,
         DiskSpaceService diskSpaceService,
         NotificationService notificationService,
-        SportarrApiClient sportarrApiClient)
+        SportarrApiClient sportarrApiClient,
+        EpisodeNumberResolver episodeNumberResolver,
+        DvrEarlyFinishGuard earlyFinishGuard)
     {
         _logger = logger;
         _db = db;
@@ -69,6 +80,8 @@ public class DvrRecordingService
         _diskSpaceService = diskSpaceService;
         _notificationService = notificationService;
         _sportarrApiClient = sportarrApiClient;
+        _episodeNumberResolver = episodeNumberResolver;
+        _earlyFinishGuard = earlyFinishGuard;
     }
 
     /// <summary>
@@ -747,12 +760,35 @@ public class DvrRecordingService
     /// <summary>
     /// Called by the recorder's monitor task when an ffmpeg process
     /// exited without a stop request (stream death, provider drop,
-    /// crash). Fails the row and rotates to a fallback channel while
-    /// the scheduled window is still open; when the exit landed at the
-    /// natural end of the window with data on disk, finalizes it as
-    /// Completed instead so a stream that ends exactly on time isn't
-    /// reported as a failure.
+    /// crash), and by the watchdog when it kills a stalled recorder.
+    /// Fails the row and rotates to a fallback channel while the
+    /// scheduled window is still open; when the exit landed at the
+    /// natural end of the window, or within EarlyEndGraceFraction of the
+    /// scheduled duration before the scheduled end, with data on disk,
+    /// finalizes it as Completed instead - covers both a stream that
+    /// ends exactly on time and a live event that wraps up early and
+    /// drops the feed.
     /// </summary>
+    /// <summary>
+    /// Whether a recorder exit reads as the end of the broadcast rather than
+    /// a failure. True at the natural end of the window, and true once the
+    /// last EarlyEndGraceFraction of the scheduled duration has been reached,
+    /// which is where a live event that finished early drops its feed. Always
+    /// false with nothing on disk, so an empty capture never finalizes as a
+    /// completed recording.
+    /// </summary>
+    internal static bool ExitLooksLikeANormalEnd(
+        DateTime now, DateTime scheduledStart, DateTime scheduledEnd, int postPaddingMinutes, long fileSize)
+    {
+        if (fileSize <= 0) return false;
+
+        var windowEnd = scheduledEnd.AddMinutes(postPaddingMinutes);
+        if (now >= windowEnd.AddSeconds(-30)) return true;
+
+        var earlyEndThreshold = scheduledEnd - ((scheduledEnd - scheduledStart) * EarlyEndGraceFraction);
+        return now >= earlyEndThreshold;
+    }
+
     public async Task HandleRecorderExitAsync(int recordingId, int exitCode, string? errorSummary)
     {
         var recording = await _db.DvrRecordings
@@ -766,30 +802,54 @@ public class DvrRecordingService
         if (recording == null || recording.Status != DvrRecordingStatus.Recording)
             return;
 
+        using var finalizing = _ffmpegRecorder.TryBeginFinalizing(recordingId);
+        if (finalizing == null)
+            return;
+
         var now = DateTime.UtcNow;
         var windowEnd = recording.ScheduledEnd.AddMinutes(recording.PostPadding);
         _overtimeExtensions.TryRemove(recordingId, out _);
+        _earlyFinishGuard.Forget(recordingId);
 
-        long fileSize = 0;
-        if (!string.IsNullOrEmpty(recording.OutputPath) && File.Exists(recording.OutputPath))
+        // Null means "couldn't read it" (missing, or a transient
+        // IOException from the file still flushing/closing) rather than
+        // "empty" - callers decide whether that means zero or "keep
+        // whatever we read last".
+        long? TryReadFileSize()
         {
-            try { fileSize = new FileInfo(recording.OutputPath).Length; }
-            catch (IOException) { /* transient - treated as no data */ }
+            if (string.IsNullOrEmpty(recording.OutputPath) || !File.Exists(recording.OutputPath))
+                return null;
+            try { return new FileInfo(recording.OutputPath).Length; }
+            catch (IOException) { return null; }
         }
+
+        var fileSize = TryReadFileSize() ?? 0;
 
         recording.ActualEnd = now;
         recording.LastUpdated = now;
 
-        // Exited within 30s of the natural end with data on disk:
-        // the stream simply ended on time, so this is a completed run.
-        if (fileSize > 0 && now >= windowEnd.AddSeconds(-30))
+        // Discard a worthless partial before deciding Completed vs
+        // Failed - otherwise a near-instant drop that happens to land
+        // close to the scheduled end (e.g. a very short scheduled
+        // window) could finalize as a "completed" recording of an
+        // effectively empty file. CleanupWorthlessPartial only deletes
+        // when the file is under its size floor, so a real partial
+        // capture is untouched here; re-read the size afterward since
+        // it may now be gone.
+        CleanupWorthlessPartial(recording);
+        fileSize = TryReadFileSize() ?? 0;
+
+        // Exited at or after the natural end (30s grace), or after
+        // EarlyEndGraceFraction of the scheduled duration has already
+        // elapsed, with data on disk: either the stream ran to its
+        // scheduled finish, or the live event wrapped up early and the
+        // feed dropped - both are completed runs, not failures.
+        if (ExitLooksLikeANormalEnd(now, recording.ScheduledStart, recording.ScheduledEnd, recording.PostPadding, fileSize))
         {
             await FinalizeCaptureContainerAsync(recording);
-            if (!string.IsNullOrEmpty(recording.OutputPath) && File.Exists(recording.OutputPath))
-            {
-                try { fileSize = new FileInfo(recording.OutputPath).Length; }
-                catch (IOException) { /* keep the pre-remux size */ }
-            }
+            await ProbeCompletedOutputAsync(recording);
+            await RenameCompletedOutputAsync(recording);
+            fileSize = TryReadFileSize() ?? fileSize; // keep the pre-remux size if the re-read fails
 
             recording.Status = DvrRecordingStatus.Completed;
             recording.FileSize = fileSize;
@@ -799,8 +859,8 @@ public class DvrRecordingService
             recording.AverageBitrate = (fileSize * 8) / duration;
             await PersistRecordingStatusAsync(recording, "completed");
 
-            _logger.LogInformation("[DVR] Recording {Id}: recorder exited at the end of its window; finalized as completed ({Size} bytes)",
-                recordingId, fileSize);
+            _logger.LogInformation("[DVR] Recording {Id}: recorder exited {When} (scheduled end {End}); finalized as completed ({Size} bytes)",
+                recordingId, now >= windowEnd.AddSeconds(-30) ? "at the end of its window" : "within the early-end grace window", recording.ScheduledEnd, fileSize);
             FirePostRecordingCommand(recording);
 
             await NotifyRecordingAsync(NotificationTrigger.OnRecordingCompleted,
@@ -816,7 +876,6 @@ public class DvrRecordingService
         await PersistRecordingStatusAsync(recording, "failed");
 
         _logger.LogWarning("[DVR] Recording {Id}: recorder exited mid-window (code {Code}); marked Failed", recordingId, exitCode);
-        CleanupWorthlessPartial(recording);
 
         int? rotatedId = null;
         if (now < windowEnd)
@@ -913,6 +972,7 @@ public class DvrRecordingService
             return;
 
         var target = Path.ChangeExtension(recording.OutputPath, ".mp4");
+        SelfMoveTracker.Register(recording.OutputPath, target);
         if (await _ffmpegRecorder.RemuxAsync(recording.OutputPath, target))
         {
             try { File.Delete(recording.OutputPath); }
@@ -940,11 +1000,14 @@ public class DvrRecordingService
         // process is alive. Revealing and remuxing a large capture runs for
         // minutes with no process behind it, which is the state the watchdog
         // treats as a crashed recorder.
-        using var finalizing = _ffmpegRecorder.BeginFinalizing(recordingId);
+        using var finalizing = _ffmpegRecorder.TryBeginFinalizing(recordingId);
+        if (finalizing == null)
+            return new RecordingResult { Success = false, Error = "Recording is already being finalized." };
 
         var result = await _ffmpegRecorder.StopRecordingAsync(recordingId);
 
         _overtimeExtensions.TryRemove(recordingId, out _);
+        _earlyFinishGuard.Forget(recordingId);
 
         // The watchdog or the recorder's exit callback may have finalized
         // (and possibly fallback-rotated) this row while we waited for the
@@ -972,6 +1035,8 @@ public class DvrRecordingService
         if (result.Success)
         {
             await FinalizeCaptureContainerAsync(recording);
+            await ProbeCompletedOutputAsync(recording);
+            await RenameCompletedOutputAsync(recording);
 
             recording.Status = DvrRecordingStatus.Completed;
             recording.FileSize = result.FileSize;
@@ -1166,20 +1231,129 @@ public class DvrRecordingService
     }
 
     /// <summary>
-    /// Get recordings that should stop (past their scheduled end + post-padding)
+    /// Get live recordings due to stop by schedule or confirmed final status
     /// </summary>
-    public async Task<List<DvrRecording>> GetRecordingsToStopAsync()
+    public async Task<List<DvrRecording>> GetRecordingsToStopAsync(CancellationToken cancellationToken = default)
     {
         var now = DateTime.UtcNow;
-
-        return await _db.DvrRecordings
+        var config = await _configService.GetConfigAsync();
+        var recordings = await _db.DvrRecordings
+            .Include(r => r.Event).ThenInclude(e => e!.League)
             .Where(r => r.Status == DvrRecordingStatus.Recording)
             // Catchup downloads are in Recording state while pulling from
             // the archive, with a window that's in the past by design -
             // the wall-clock stop rule only applies to live captures.
             .Where(r => r.Method == DvrRecordingMethod.Live)
-            .Where(r => r.ScheduledEnd.AddMinutes(r.PostPadding) <= now)
-            .ToListAsync();
+            .ToListAsync(cancellationToken);
+
+        _earlyFinishGuard.RetainOnly(config.DvrEarlyFinishGuardEnabled
+            ? recordings.Select(r => r.Id) : Array.Empty<int>());
+        var ready = recordings.Where(r => r.ScheduledEnd.AddMinutes(r.PostPadding) <= now).ToList();
+        if (!config.DvrEarlyFinishGuardEnabled)
+            return ready;
+
+        // Optional status checks must not hold the scheduler through an outage.
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(TimeSpan.FromSeconds(10));
+        foreach (var recording in recordings.Except(ready))
+        {
+            if (_ffmpegRecorder.IsFinalizing(recording.Id))
+            {
+                _earlyFinishGuard.Forget(recording.Id);
+                continue;
+            }
+            try
+            {
+                if (await ShouldStopEarlyAsync(recording, budget.Token))
+                    ready.Add(recording);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                _earlyFinishGuard.RetainOnly(Array.Empty<int>());
+                break;
+            }
+        }
+        return ready;
+    }
+
+    public async Task<bool> IsReadyToStopAsync(DvrRecording recording, CancellationToken cancellationToken = default)
+    {
+        // Finalizing another recording can take minutes. Recheck this row before stopping it.
+        await _db.Entry(recording).ReloadAsync(cancellationToken);
+        if (_ffmpegRecorder.IsFinalizing(recording.Id) || _db.Entry(recording).State == EntityState.Detached ||
+            recording.Status != DvrRecordingStatus.Recording || recording.Method != DvrRecordingMethod.Live)
+            return false;
+        if (recording.ScheduledEnd.AddMinutes(recording.PostPadding) <= DateTime.UtcNow)
+        {
+            if (await ShouldExtendForOvertimeAsync(recording, cancellationToken))
+                return false;
+            await _db.Entry(recording).ReloadAsync(cancellationToken);
+            return !_ffmpegRecorder.IsFinalizing(recording.Id) && _db.Entry(recording).State != EntityState.Detached &&
+                recording.Status == DvrRecordingStatus.Recording && recording.Method == DvrRecordingMethod.Live &&
+                recording.ScheduledEnd.AddMinutes(recording.PostPadding) <= DateTime.UtcNow;
+        }
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(TimeSpan.FromSeconds(10));
+        try
+        {
+            return await ShouldStopEarlyAsync(recording, budget.Token);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            _earlyFinishGuard.Forget(recording.Id);
+            return false;
+        }
+    }
+
+    private async Task<bool> ShouldStopEarlyAsync(DvrRecording recording, CancellationToken cancellationToken)
+    {
+        var config = await _configService.GetConfigAsync();
+        if (!config.DvrEarlyFinishGuardEnabled || !recording.EventId.HasValue)
+        {
+            _earlyFinishGuard.Forget(recording.Id);
+            return false;
+        }
+
+        var evt = await _db.Events.AsNoTracking().Include(e => e.League)
+            .FirstOrDefaultAsync(e => e.Id == recording.EventId.Value, cancellationToken);
+        var leagueId = evt?.League?.ExternalId;
+        if (string.IsNullOrWhiteSpace(evt?.ExternalId) || string.IsNullOrWhiteSpace(leagueId))
+        {
+            _earlyFinishGuard.Forget(recording.Id);
+            return false;
+        }
+
+        var eventId = recording.EventId;
+        var actualStart = recording.ActualStart;
+        var scores = await _sportarrApiClient.GetDvrLivescoreByLeagueAsync(leagueId, cancellationToken);
+        config = await _configService.GetConfigAsync();
+        await _db.Entry(recording).ReloadAsync(cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!config.DvrEarlyFinishGuardEnabled || _ffmpegRecorder.IsFinalizing(recording.Id) ||
+            _db.Entry(recording).State == EntityState.Detached ||
+            recording.EventId != eventId || recording.ActualStart != actualStart)
+        {
+            _earlyFinishGuard.Forget(recording.Id);
+            return false;
+        }
+        var currentIdentity = await _db.Events.AsNoTracking()
+            .Where(e => e.Id == eventId)
+            .Select(e => new { e.ExternalId, e.LeagueId, e.EventDate,
+                LeagueExternalId = e.League != null ? e.League.ExternalId : null })
+            .SingleOrDefaultAsync(cancellationToken);
+        if (currentIdentity == null || currentIdentity.ExternalId != evt.ExternalId ||
+            currentIdentity.LeagueId != evt.LeagueId || currentIdentity.LeagueExternalId != leagueId ||
+            currentIdentity.EventDate > DateTime.UtcNow)
+        {
+            _earlyFinishGuard.Forget(recording.Id);
+            return false;
+        }
+        var matches = scores?.Where(score => score.EventId == evt.ExternalId && score.LeagueId == leagueId).ToList();
+        var score = matches?.Count == 1 ? matches[0] : null;
+        if (score?.RequestOrigin != _sportarrApiClient.DvrLiveSourceOrigin)
+            score = null;
+        return _earlyFinishGuard.Observe(recording, score, evt.ExternalId, leagueId,
+            DateTimeOffset.UtcNow, config.DvrEarlyFinishBufferMinutes);
     }
 
     /// <summary>
@@ -1194,7 +1368,7 @@ public class DvrRecordingService
     /// or the cap reached all mean "stop as scheduled", so the guard can
     /// never keep a recording alive on ambiguity.
     /// </summary>
-    public async Task<bool> ShouldExtendForOvertimeAsync(DvrRecording recording)
+    public async Task<bool> ShouldExtendForOvertimeAsync(DvrRecording recording, CancellationToken cancellationToken = default)
     {
         if (recording.EventId == null || recording.Method != DvrRecordingMethod.Live)
             return false;
@@ -1216,18 +1390,29 @@ public class DvrRecordingService
 
             var evt = await _db.Events
                 .Include(e => e.League)
-                .FirstOrDefaultAsync(e => e.Id == recording.EventId.Value);
+                .FirstOrDefaultAsync(e => e.Id == recording.EventId.Value, cancellationToken);
             if (evt?.ExternalId == null || evt.League?.ExternalId == null)
                 return false;
 
-            var livescore = await GetLivescoreCachedAsync(evt.League.ExternalId);
-            var liveEntry = livescore?.FirstOrDefault(l => l.ExternalId == evt.ExternalId);
-            if (liveEntry == null || !IndicatesInProgress(liveEntry.Status))
+            var eventId = recording.EventId;
+            var livescore = await _sportarrApiClient.GetDvrLivescoreByLeagueAsync(evt.League.ExternalId, cancellationToken);
+            config = await _configService.GetConfigAsync();
+            await _db.Entry(recording).ReloadAsync(cancellationToken);
+            if (_db.Entry(recording).State == EntityState.Detached ||
+                recording.Status != DvrRecordingStatus.Recording || recording.Method != DvrRecordingMethod.Live ||
+                recording.EventId != eventId || recording.ScheduledEnd.AddMinutes(recording.PostPadding) > DateTime.UtcNow)
+                return true;
+            if (!config.DvrOvertimeGuardEnabled)
+                return false;
+            var matches = livescore?.Where(l => l.EventId == evt.ExternalId && l.LeagueId == evt.League.ExternalId).ToList();
+            var liveEntry = matches?.Count == 1 ? matches[0] : null;
+            if (liveEntry == null || liveEntry.RequestOrigin != _sportarrApiClient.DvrLiveSourceOrigin ||
+                !liveEntry.IsFresh(DateTimeOffset.UtcNow) || !liveEntry.IsInProgress)
                 return false;
 
             recording.ScheduledEnd = recording.ScheduledEnd.AddMinutes(OvertimeStepMinutes);
             recording.LastUpdated = DateTime.UtcNow;
-            await _db.SaveChangesAsync();
+            await _db.SaveChangesAsync(cancellationToken);
             _overtimeExtensions[recording.Id] = extendedSoFar + OvertimeStepMinutes;
 
             _logger.LogInformation(
@@ -1235,6 +1420,10 @@ public class DvrRecordingService
                 evt.Title, liveEntry.Status, recording.Id, OvertimeStepMinutes,
                 extendedSoFar + OvertimeStepMinutes, config.DvrOvertimeMaxExtensionMinutes);
             return true;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -1269,22 +1458,6 @@ public class DvrRecordingService
         // Everything else on a live feed ("live", "1st half", "q3", "ht",
         // period/lap/round descriptors...) counts as in progress.
         return true;
-    }
-
-    private async Task<List<Event>?> GetLivescoreCachedAsync(string leagueExternalId)
-    {
-        if (_livescoreCache.TryGetValue(leagueExternalId, out var cached) &&
-            DateTime.UtcNow - cached.FetchedAt < TimeSpan.FromSeconds(60))
-        {
-            return cached.Events;
-        }
-
-        var events = await _sportarrApiClient.GetLivescoreByLeagueAsync(leagueExternalId);
-        if (events != null)
-        {
-            _livescoreCache[leagueExternalId] = (DateTime.UtcNow, events);
-        }
-        return events;
     }
 
     /// <summary>
@@ -1346,6 +1519,171 @@ public class DvrRecordingService
     // ============================================================================
 
     /// <summary>
+    /// Probe a finalized recording and replace its assumed channel quality
+    /// with the media file's detected quality.
+    /// </summary>
+    public async Task<MediaProbeResult?> ProbeCompletedOutputAsync(DvrRecording recording)
+    {
+        if (string.IsNullOrWhiteSpace(recording.OutputPath) || !File.Exists(recording.OutputPath))
+        {
+            return null;
+        }
+
+        try
+        {
+            var probeResult = await _ffmpegRecorder.ProbeFileAsync(recording.OutputPath);
+            if (!probeResult.Success)
+            {
+                _logger.LogWarning("[DVR] Failed to probe recording {Id}: {Error}", recording.Id, probeResult.Error);
+                return null;
+            }
+
+            recording.VideoWidth = probeResult.Width;
+            recording.VideoHeight = probeResult.Height;
+            recording.VideoCodec = probeResult.GetCodecDisplay();
+            recording.AudioCodec = probeResult.AudioCodec;
+            recording.AudioChannels = probeResult.AudioChannels;
+            var resolution = probeResult.GetResolution();
+            recording.Quality = QualityParser.MapQuality(QualityParser.QualitySource.IPTV, resolution, false).Name;
+            return probeResult;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[DVR] Error probing recording {Id}", recording.Id);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Rename a direct completed recording after the media probe replaces the
+    /// channel's assumed quality with the file's detected quality.
+    /// </summary>
+    public async Task RenameCompletedOutputAsync(DvrRecording recording)
+    {
+        if (!string.IsNullOrWhiteSpace(recording.ImportMode)
+            || !recording.EventId.HasValue
+            || string.IsNullOrWhiteSpace(recording.OutputPath)
+            || !File.Exists(recording.OutputPath))
+        {
+            return;
+        }
+
+        var originalPath = recording.OutputPath;
+        var finalContainer = Path.GetExtension(originalPath).TrimStart('.');
+        if (string.IsNullOrWhiteSpace(finalContainer))
+        {
+            _logger.LogWarning(
+                "[DVR] Cannot update the completed name for recording {Id}; the output path has no file extension: {Path}",
+                recording.Id, originalPath);
+            return;
+        }
+
+        string expectedPath;
+        Event eventInfo;
+        try
+        {
+            if (recording.Event == null)
+            {
+                await _db.Entry(recording).Reference(r => r.Event).LoadAsync();
+            }
+            if (recording.Event?.LeagueId.HasValue == true && recording.Event.League == null)
+            {
+                await _db.Entry(recording.Event).Reference(e => e.League).LoadAsync();
+            }
+            if (recording.Event == null)
+            {
+                return;
+            }
+            eventInfo = recording.Event;
+
+            var settings = await GetMediaManagementSettingsAsync();
+            if (!settings.RenameEvents)
+            {
+                return;
+            }
+
+            var episodeNumber = await _episodeNumberResolver.ResolveAsync(eventInfo);
+            if (!eventInfo.EpisodeNumber.HasValue || eventInfo.EpisodeNumber.Value != episodeNumber)
+            {
+                eventInfo.EpisodeNumber = episodeNumber;
+            }
+
+            var filename = BuildEventOutputFileName(recording, eventInfo, settings, finalContainer, episodeNumber);
+            expectedPath = Path.Combine(Path.GetDirectoryName(originalPath) ?? string.Empty, filename);
+            expectedPath = await ClaimFreeOutputPathAsync(expectedPath, recording);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "[DVR] Could not build the detected-quality name for recording {Id}; keeping {Path}",
+                recording.Id, originalPath);
+            return;
+        }
+
+        if (PathsMatch(originalPath, expectedPath))
+        {
+            return;
+        }
+
+        var moved = false;
+        var linkedFiles = new List<EventFile>();
+        var linkedEvents = new List<Event>();
+        try
+        {
+            linkedFiles = await _db.EventFiles.Where(f => f.FilePath == originalPath).ToListAsync();
+            linkedEvents = await _db.Events.Where(e => e.FilePath == originalPath).ToListAsync();
+            SelfMoveTracker.Register(originalPath, expectedPath);
+            File.Move(originalPath, expectedPath);
+            moved = true;
+            recording.OutputPath = expectedPath;
+            foreach (var linkedFile in linkedFiles)
+            {
+                linkedFile.FilePath = expectedPath;
+            }
+            foreach (var linkedEvent in linkedEvents)
+            {
+                linkedEvent.FilePath = expectedPath;
+            }
+            await _db.SaveChangesAsync();
+            _logger.LogInformation(
+                "[DVR] Updated completed recording {Id} to its detected-quality name: {Path}",
+                recording.Id, expectedPath);
+        }
+        catch (Exception ex)
+        {
+            if (moved)
+            {
+                try
+                {
+                    SelfMoveTracker.Register(expectedPath, originalPath);
+                    File.Move(expectedPath, originalPath);
+                }
+                catch (Exception rollbackEx)
+                {
+                    recording.OutputPath = expectedPath;
+                    _logger.LogError(rollbackEx,
+                        "[DVR] Could not restore recording {Id} after its path update failed; the file remains at {Path}",
+                        recording.Id, expectedPath);
+                    return;
+                }
+            }
+
+            recording.OutputPath = originalPath;
+            foreach (var linkedFile in linkedFiles)
+            {
+                linkedFile.FilePath = originalPath;
+            }
+            foreach (var linkedEvent in linkedEvents)
+            {
+                linkedEvent.FilePath = originalPath;
+            }
+            _logger.LogWarning(ex,
+                "[DVR] Could not rename completed recording {Id}; keeping {Path}",
+                recording.Id, originalPath);
+        }
+    }
+
+    /// <summary>
     /// Generate output path for DVR recording using the same folder structure as regular imports.
     /// Uses MediaManagementSettings and FileNamingService for consistency with indexer downloads.
     /// Public so CatchupDownloadService produces identical event-aware paths for archive downloads.
@@ -1374,7 +1712,7 @@ public class DvrRecordingService
             {
                 throw new InvalidOperationException(
                     $"The configured DVR Recording Path '{configuredDvrPath}' is not accessible ({ex.Message}). " +
-                    "Fix the path in Settings > IPTV/DVR or clear it to record into a Media Management root folder.",
+                    "Fix the path in IPTV > Options > Recording or clear it to record into a Media Management root folder.",
                     ex);
             }
             basePath = configuredDvrPath;
@@ -1400,7 +1738,7 @@ public class DvrRecordingService
                 // cannot find and will lose.
                 throw new InvalidOperationException(
                     "No DVR Recording Path is set and no accessible root folder exists, so there is nowhere " +
-                    "durable to record. Set a path in Settings > IPTV/DVR, or add a root folder in " +
+                    "durable to record. Set a path in IPTV > Options > Recording, or add a root folder in " +
                     "Settings > Media Management.");
             }
 
@@ -1435,7 +1773,7 @@ public class DvrRecordingService
 
             // IMPORTANT: Calculate episode number BEFORE building folder path
             // This ensures the {Episode} token in EventFolderFormat has the correct value
-            var episodeNumber = await CalculateEpisodeNumberAsync(eventInfo);
+            var episodeNumber = await _episodeNumberResolver.ResolveAsync(eventInfo);
 
             // Update event's episode number if needed
             if (!eventInfo.EpisodeNumber.HasValue || eventInfo.EpisodeNumber.Value != episodeNumber)
@@ -1451,49 +1789,8 @@ public class DvrRecordingService
                 destinationPath = Path.Combine(destinationPath, folderPath);
             }
 
-            // Build filename using FileNamingService with same tokens as regular imports
-            // Note: Use RenameEvents setting (same as FileRenameService) so user has single setting to control renaming
-            // RenameFiles was a separate setting that caused confusion - imports should respect RenameEvents
-            if (settings.RenameEvents)
-            {
-                var partSuffix = !string.IsNullOrEmpty(recording.PartName)
-                    ? $" - {recording.PartName}"
-                    : "";
-
-                // Use the broadcaster-branding date for filename tokens —
-                // see FileRenameService for the UTC-rollover rationale.
-                var brandingDate = eventInfo.BroadcastDate ?? eventInfo.EventDate.Date;
-
-                var tokens = new FileNamingTokens
-                {
-                    EventTitle = eventInfo.Title,
-                    EventTitleThe = eventInfo.Title,
-                    SportarrId = eventInfo.ExternalId ?? string.Empty,
-                    AirDate = brandingDate,
-                    Quality = recording.Quality ?? "HDTV-1080p",
-                    QualityFull = $"{recording.Quality ?? "HDTV-1080p"}.DVR",
-                    ReleaseGroup = "DVR",
-                    OriginalTitle = recording.Title,
-                    OriginalFilename = recording.Title,
-                    Series = eventInfo.League?.Name ?? eventInfo.Sport,
-                    Season = eventInfo.SeasonNumber?.ToString("0000") ?? eventInfo.Season ?? brandingDate.Year.ToString(),
-                    Episode = episodeNumber.ToString("00"),
-                    Part = partSuffix
-                };
-
-                var filename = _namingService.BuildFileName(settings.StandardFileFormat, tokens, $".{container}", settings.ReplaceIllegalCharacters);
-                destinationPath = Path.Combine(destinationPath, filename);
-            }
-            else
-            {
-                // No renaming - use event title with timestamp
-                var timestamp = recording.ScheduledStart.ToString("yyyy-MM-dd_HHmm");
-                var partSuffix = !string.IsNullOrEmpty(recording.PartName)
-                    ? $" - {SanitizeFileName(recording.PartName)}"
-                    : "";
-                var filename = $"{SanitizeFileName(eventInfo.Title)}{partSuffix} [{timestamp}].{container}";
-                destinationPath = Path.Combine(destinationPath, filename);
-            }
+            var filename = BuildEventOutputFileName(recording, eventInfo, settings, container, episodeNumber);
+            destinationPath = Path.Combine(destinationPath, filename);
         }
         else
         {
@@ -1518,6 +1815,50 @@ public class DvrRecordingService
         destinationPath = await ClaimFreeOutputPathAsync(destinationPath, recording);
 
         return HideWhileWriting(destinationPath);
+    }
+
+    private string BuildEventOutputFileName(
+        DvrRecording recording,
+        Event eventInfo,
+        MediaManagementSettings settings,
+        string container,
+        int episodeNumber)
+    {
+        if (!settings.RenameEvents)
+        {
+            var timestamp = recording.ScheduledStart.ToString("yyyy-MM-dd_HHmm");
+            var unrenamedPartSuffix = !string.IsNullOrEmpty(recording.PartName)
+                ? $" - {SanitizeFileName(recording.PartName)}"
+                : "";
+            return $"{SanitizeFileName(eventInfo.Title)}{unrenamedPartSuffix} [{timestamp}].{container}";
+        }
+
+        var partSuffix = !string.IsNullOrEmpty(recording.PartName)
+            ? $" - {recording.PartName}"
+            : "";
+        var brandingDate = eventInfo.BroadcastDate ?? eventInfo.EventDate.Date;
+        var tokens = new FileNamingTokens
+        {
+            EventTitle = eventInfo.Title,
+            EventTitleThe = eventInfo.Title,
+            SportarrId = eventInfo.ExternalId ?? string.Empty,
+            AirDate = brandingDate,
+            Quality = recording.Quality ?? "HDTV-1080p",
+            QualityFull = $"{recording.Quality ?? "HDTV-1080p"}.DVR",
+            ReleaseGroup = "DVR",
+            OriginalTitle = recording.Title,
+            OriginalFilename = recording.Title,
+            Series = eventInfo.League?.Name ?? eventInfo.Sport,
+            Season = eventInfo.SeasonNumber?.ToString("0000") ?? eventInfo.Season ?? brandingDate.Year.ToString(),
+            Episode = episodeNumber.ToString("00"),
+            Part = partSuffix
+        };
+
+        return _namingService.BuildFileName(
+            settings.StandardFileFormat,
+            tokens,
+            $".{container}",
+            settings.ReplaceIllegalCharacters);
     }
 
     /// <summary>
@@ -1690,6 +2031,7 @@ public class DvrRecordingService
         {
             if (File.Exists(path))
             {
+                SelfMoveTracker.Register(path, target);
                 File.Move(path, target, overwrite: true);
                 _logger.LogDebug("[DVR] Capture finished, revealed as {Path}", target);
                 return target;
@@ -1754,39 +2096,6 @@ public class DvrRecordingService
 
         // Root folders live in the RootFolders table (loaded via RootFolderLoader).
         return settings;
-    }
-
-    /// <summary>
-    /// Calculate episode number for an event (same logic as FileImportService)
-    /// </summary>
-    private async Task<int> CalculateEpisodeNumberAsync(Event eventInfo)
-    {
-        if (!eventInfo.LeagueId.HasValue)
-            return 1;
-
-        var season = eventInfo.Season ?? eventInfo.SeasonNumber?.ToString() ?? (eventInfo.BroadcastDate ?? eventInfo.EventDate).Year.ToString();
-
-        var eventsInSeason = await _db.Events
-            .Where(e => e.LeagueId == eventInfo.LeagueId &&
-                       (e.Season == season ||
-                        (e.SeasonNumber.HasValue && e.SeasonNumber.ToString() == season) ||
-                        (e.BroadcastDate.HasValue ? e.BroadcastDate.Value.Year.ToString() == season : e.EventDate.Year.ToString() == season)))
-            .OrderBy(e => e.EventDate)
-            .ThenBy(e => e.ExternalId)
-            .Select(e => new { e.Id, e.EventDate, e.ExternalId })
-            .ToListAsync();
-
-        if (eventsInSeason.Count == 0)
-            return 1;
-
-        var position = eventsInSeason.FindIndex(e => e.Id == eventInfo.Id);
-        if (position < 0)
-        {
-            position = eventsInSeason.Count(e => e.EventDate < eventInfo.EventDate ||
-                (e.EventDate == eventInfo.EventDate && string.Compare(e.ExternalId, eventInfo.ExternalId, StringComparison.Ordinal) < 0));
-        }
-
-        return position + 1;
     }
 
     private static string SanitizeFileName(string name)

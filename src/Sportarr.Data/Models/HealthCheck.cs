@@ -49,7 +49,10 @@ public enum HealthCheckType
 
     // Data integrity checks
     OrphanedEvents,
-    CorruptedDatabase
+    CorruptedDatabase,
+    LeagueFolderRenamed,
+    BackupsFailing,
+    HealthCheckFailed
 }
 
 /// <summary>

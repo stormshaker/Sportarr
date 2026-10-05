@@ -7,7 +7,6 @@ import { runSettingsSave } from '../../hooks/useSettings';
 import SettingsHeader from '../../components/SettingsHeader';
 import { useUnsavedChanges } from '../../hooks/useUnsavedChanges';
 import TagSelector from '../../components/TagSelector';
-import { errorMessage } from '../../utils/errors';
 
 interface DownloadClientsSettingsProps {
   showAdvanced?: boolean;
@@ -101,7 +100,6 @@ const isBlackholeType = (type: number | undefined): boolean => type === 10 || ty
 // Determine protocol based on type
 const getProtocol = (type: number): 'usenet' | 'torrent' => {
   const protocol = (type === 5 || type === 6 || type === 8 || type === 9 || type === 11 || type === 14) ? 'usenet' : 'torrent';
-  console.log(`[DEBUG] getProtocol: type=${type}, protocol=${protocol}, type===5: ${type === 5}, type===6: ${type === 6}, type===8: ${type === 8}, type===9: ${type === 9}`);
   return protocol;
 };
 
@@ -271,7 +269,7 @@ const downloadClientTemplates: ClientTemplate[] = [
   }
 ];
 
-export default function DownloadClientsSettings({ showAdvanced: _showAdvanced = false }: DownloadClientsSettingsProps) {
+export default function DownloadClientsSettings({ showAdvanced = false }: DownloadClientsSettingsProps) {
   const [downloadClients, setDownloadClients] = useState<DownloadClient[]>([]);
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingClient, setEditingClient] = useState<DownloadClient | null>(null);
@@ -298,10 +296,6 @@ export default function DownloadClientsSettings({ showAdvanced: _showAdvanced = 
     try {
       setIsLoading(true);
       const response = await apiClient.get('/downloadclient');
-      console.log('[DEBUG] Loaded download clients from API:', response.data);
-      (response.data as DownloadClient[]).forEach((client) => {
-        console.log(`[DEBUG] Client: ${client.name}, Type: ${client.type}, Protocol: ${getProtocol(client.type)}, UrlBase: ${client.urlBase}`);
-      });
       setDownloadClients(response.data);
     } catch (error) {
       console.error('Failed to load download clients:', error);
@@ -473,7 +467,7 @@ export default function DownloadClientsSettings({ showAdvanced: _showAdvanced = 
     downloadMonitorPollSeconds: number;
     diskScanIntervalMinutes: number;
   } | null>(null);
-  useUnsavedChanges(hasUnsavedChanges);
+  const { blockNavigation } = useUnsavedChanges(hasUnsavedChanges);
 
   // Detect changes
   useEffect(() => {
@@ -553,26 +547,21 @@ export default function DownloadClientsSettings({ showAdvanced: _showAdvanced = 
     });
   };
 
-  const handleFormChange = <K extends keyof DownloadClient>(field: K, value: DownloadClient[K]) => {
+  const handleFormChange = (field: keyof DownloadClient, value: any) => {
     // Auto-strip protocol from host field (users commonly paste full URLs like http://192.168.1.5)
     // If they paste https://, also enable UseSsl so the secure intent is preserved
     if (field === 'host' && typeof value === 'string') {
       const hadHttps = /^https:\/\//i.test(value);
       const hadHttp = /^http:\/\//i.test(value);
-      // A local rather than reassigning the parameter: value is typed to the
-      // field being set, and the compiler cannot know that field === 'host'
-      // narrows K to a string-valued key.
-      const host = value.replace(/^https?:\/\//i, '').replace(/\/+$/, '').replace(/:[\d]+$/, '');
+      value = value.replace(/^https?:\/\//i, '').replace(/\/+$/, '').replace(/:[\d]+$/, '');
       if (hadHttps) {
-        setFormData(prev => ({ ...prev, host, useSsl: true }));
+        setFormData(prev => ({ ...prev, host: value, useSsl: true }));
         return;
       }
       if (hadHttp) {
-        setFormData(prev => ({ ...prev, host, useSsl: false }));
+        setFormData(prev => ({ ...prev, host: value, useSsl: false }));
         return;
       }
-      setFormData(prev => ({ ...prev, host }));
-      return;
     }
     setFormData(prev => ({ ...prev, [field]: value }));
   };
@@ -592,9 +581,6 @@ export default function DownloadClientsSettings({ showAdvanced: _showAdvanced = 
 
     try {
       setIsLoading(true);
-      console.log('[DEBUG] Saving download client with data:', formData);
-      console.log('[DEBUG] UrlBase value being saved:', formData.urlBase);
-
       if (editingClient) {
         // Update existing
         await apiClient.put(`/downloadclient/${editingClient.id}`, formData);
@@ -623,9 +609,8 @@ export default function DownloadClientsSettings({ showAdvanced: _showAdvanced = 
         tags: []
       });
     } catch (error) {
-      console.error('Failed to save download client:', error);
       toast.error('Save Failed', {
-        description: 'Failed to save download client. Please check the console for details.',
+        description: 'Failed to save download client. Please try again.',
       });
     } finally {
       setIsLoading(false);
@@ -633,11 +618,8 @@ export default function DownloadClientsSettings({ showAdvanced: _showAdvanced = 
   };
 
   const handleEditClient = (client: DownloadClient) => {
-    console.log('[DEBUG] Editing client:', client);
-    console.log('[DEBUG] Client urlBase:', client.urlBase);
     setEditingClient(client);
     setFormData(client);
-    console.log('[DEBUG] FormData after setFormData:', client);
     setTestResult(null);
     const clientName = clientTypeNameMap[client.type];
     const template = downloadClientTemplates.find(t => t.implementation === clientName);
@@ -687,9 +669,8 @@ export default function DownloadClientsSettings({ showAdvanced: _showAdvanced = 
           });
         }
       }
-    } catch (error) {
-      console.error('Test failed:', error);
-      const result = { success: false, message: errorMessage(error, 'Connection test failed!') };
+    } catch (error: any) {
+      const result = { success: false, message: error.response?.data?.message || 'Connection test failed!' };
       setTestResult(result);
 
       // Show toast if testing from the list (not in modal)
@@ -1516,7 +1497,9 @@ export default function DownloadClientsSettings({ showAdvanced: _showAdvanced = 
 
                     {selectedTemplate?.fields.includes('urlBase') && (
                       <div>
-                        <label className="block text-sm font-medium text-gray-300 mb-2">URL Base</label>
+                        <label className="block text-sm font-medium text-gray-300 mb-2">
+                          {selectedTemplate.name === 'rTorrent' ? 'XML-RPC Path' : 'URL Base'}
+                        </label>
                         <input
                           type="text"
                           value={formData.urlBase || ''}
@@ -1527,7 +1510,7 @@ export default function DownloadClientsSettings({ showAdvanced: _showAdvanced = 
                             selectedTemplate.name === 'NZBGet' ? 'Leave empty for default (root)' :
                             selectedTemplate.name === 'Transmission' ? '/transmission' :
                             selectedTemplate.name === 'Deluge' ? 'Leave empty for default (root)' :
-                            selectedTemplate.name === 'rTorrent' ? '/rutorrent' :
+                            selectedTemplate.name === 'rTorrent' ? '/RPC2 or /rutorrent/RPC2' :
                             selectedTemplate.name === 'qBittorrent' ? 'Leave empty for default (root)' :
                             selectedTemplate.name === 'DecypharrUsenet' ? '/sabnzbd' :
                             selectedTemplate.name === 'Decypharr' ? 'Leave empty for default (root)' :
@@ -1540,7 +1523,7 @@ export default function DownloadClientsSettings({ showAdvanced: _showAdvanced = 
                           {selectedTemplate.name === 'qBittorrent' && 'URL path prefix for qBittorrent Web UI. Default is root (leave empty). Set only if configured in qBittorrent settings.'}
                           {selectedTemplate.name === 'Transmission' && 'RPC URL path for Transmission. Default is /transmission. Leave empty only if you changed it in Transmission settings.'}
                           {selectedTemplate.name === 'Deluge' && 'Base URL for Deluge web interface. Default is root (leave empty). Use /deluge only if configured in Deluge settings.'}
-                          {selectedTemplate.name === 'rTorrent' && 'URL base for ruTorrent web interface. Default is /rutorrent. Leave empty only if you changed it in ruTorrent settings.'}
+                          {selectedTemplate.name === 'rTorrent' && 'Enter the path only, not the full URL. Paths ending in /RPC2 are used as entered. Other paths get /RPC2 added. Leave empty to use /rutorrent/RPC2.'}
                           {selectedTemplate.name === 'Vuze' && 'URL base for Vuze web interface. Default is root (leave empty).'}
                           {selectedTemplate.name === 'Decypharr' && 'URL base for Decypharr. Default is root (leave empty unless behind a reverse proxy).'}
                           {selectedTemplate.name === 'DecypharrUsenet' && 'URL base for Decypharr usenet mode. Typically /sabnzbd since Decypharr emulates the SABnzbd API.'}

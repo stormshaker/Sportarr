@@ -7,12 +7,12 @@ import CompactTableFrame from '../components/CompactTableFrame';
 import PageHeader from '../components/PageHeader';
 import SortableFilterableHeader from '../components/SortableFilterableHeader';
 import { useCompactView } from '../hooks/useCompactView';
-import { useTableSortFilter, applyTableSortFilter } from '../hooks/useTableSortFilter';
+import { useTableSortFilter } from '../hooks/useTableSortFilter';
 import AddLeagueModal from '../components/AddLeagueModal';
 import ConfirmationModal from '../components/ConfirmationModal';
 import { apiGet, apiPost, apiPut, apiDelete } from '../utils/api';
 import { PAGE_PADDING, TABLE_ROW_HOVER } from '../utils/designTokens';
-import { isMotorsport, isGolf, isIndividualTennis, isTeamlessSport, usesFightingEventTypes } from '../utils/leagueSportRules';
+import { isMotorsport, isTeamlessSport, usesFightingEventTypes } from '../utils/leagueSportRules';
 import { getSportIcon } from '../utils/sportIcons';
 import { BUTTON_PRIMARY, BUTTON_INFO, BUTTON_SECONDARY } from '../utils/designTokens';
 
@@ -21,6 +21,7 @@ interface League {
   idLeague: string;
   strLeague: string;
   strSport: string;
+  strSportFormat?: string | null;
   strLeagueAlternate?: string;
   intFormedYear?: string;
   strCountry?: string;
@@ -48,6 +49,14 @@ interface AddedLeagueInfo {
   externalId: string;
 }
 
+// The fields this page reads from a league already in the library.
+interface LibraryLeague {
+  id: number;
+  externalId?: string;
+  logoUrl?: string;
+  eventCount?: number;
+}
+
 // Set when the user reached this page from a manual import that had no league
 // to import against. Adding one sends them straight back to that file.
 interface ImportReturn {
@@ -55,19 +64,8 @@ interface ImportReturn {
   fileName: string;
 }
 
-// A league already in the library, as /api/leagues returns it.
-interface UserLeague {
-  id: number;
-  externalId?: string;
-  name?: string;
-  monitored?: boolean;
-  monitorType?: string;
-  qualityProfileId?: number | null;
-  logoUrl?: string;
-  eventCount?: number;
-}
-
-const MAX_RENDERED_LEAGUES = 200;
+// Rows drawn per "Show more", the same pattern the Follow page uses.
+const LEAGUES_PAGE_SIZE = 60;
 
 export default function LeagueSearchPage() {
   const navigate = useNavigate();
@@ -76,7 +74,6 @@ export default function LeagueSearchPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedSport, setSelectedSport] = useState('all');
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [, setEditMode] = useState(false);
   const [hoveredLeagueId, setHoveredLeagueId] = useState<string | null>(null);
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
   const compactView = useCompactView();
@@ -88,31 +85,51 @@ export default function LeagueSearchPage() {
   const addModalDataRef = useRef<{ league: League; leagueId: number | null; editMode: boolean } | null>(null);
   const deleteModalDataRef = useRef<{ leagueId: number; leagueName: string; eventCount: number } | null>(null);
 
-  // Fetch all leagues from Sportarr API
-  // Deferring the term keeps the input painting while the next page loads,
-  // and coalesces a burst of keystrokes into far fewer round trips.
-  const deferredSearchQuery = useDeferredValue(searchQuery);
-  const [matchedLeagueCount, setMatchedLeagueCount] = useState(0);
+  // The server searches, filters, sorts and pages the catalog, so the page
+  // asks for the rows it is about to draw rather than all ~1,500 leagues.
+  // The column sort and filters belong to the compact table only.
+  const [visibleCount, setVisibleCount] = useState(LEAGUES_PAGE_SIZE);
+  const leaguesQuery = useMemo(() => {
+    const params = new URLSearchParams({ limit: String(visibleCount) });
+    if (searchQuery.trim()) params.set('q', searchQuery.trim());
+    if (selectedSport !== 'all') params.set('sport', selectedSport);
+    if (compactView) {
+      if (sortCol) {
+        params.set('sort', sortCol);
+        params.set('dir', sortDir);
+      }
+      Object.entries(colFilters).forEach(([col, value]) => {
+        if (value.trim()) params.set(`filter.${col}`, value.trim());
+      });
+    }
+    return params.toString();
+  }, [visibleCount, searchQuery, selectedSport, compactView, sortCol, sortDir, colFilters]);
+  // Typing paints at once while the request for the next page catches up.
+  const deferredLeaguesQuery = useDeferredValue(leaguesQuery);
+  const hasColumnFilter = compactView && Object.values(colFilters).some((value) => value.trim());
 
-  const { data: allLeagues = [], isLoading } = useQuery({
-    queryKey: ['sportarr-leagues', 'all', deferredSearchQuery, selectedSport],
+  const { data: leaguesPage, isLoading } = useQuery({
+    queryKey: ['sportarr-leagues', 'all', deferredLeaguesQuery],
     queryFn: async () => {
-      const params = new URLSearchParams({ limit: String(MAX_RENDERED_LEAGUES) });
-      if (deferredSearchQuery.trim()) params.set('q', deferredSearchQuery.trim());
-      if (selectedSport !== 'all') params.set('sport', selectedSport);
-
-      const response = await apiGet(`/api/leagues/all?${params.toString()}`);
+      const response = await apiGet(`/api/leagues/all?${deferredLeaguesQuery}`);
       if (!response.ok) throw new Error('Failed to fetch leagues');
-      // Total before the server truncated, so the count line can still say
-      // how many more a narrower search would reach.
+      const leagues = await response.json() as League[];
+      // Counts before the server truncated, so the page can say how many more
+      // there are. They travel with the page they describe, so a cached page
+      // never shows another request's count.
       const matched = Number.parseInt(response.headers.get('x-total-count') ?? '', 10);
-      setMatchedLeagueCount(Number.isFinite(matched) ? matched : 0);
-      return response.json() as Promise<League[]>;
+      const catalog = Number.parseInt(response.headers.get('x-catalog-count') ?? '', 10);
+      const matchedCount = Number.isFinite(matched) ? matched : leagues.length;
+      return { leagues, matched: matchedCount, catalog: Number.isFinite(catalog) ? catalog : matchedCount };
     },
+    // Keep the previous page on screen while the next one loads.
     placeholderData: (previous) => previous,
     staleTime: 5 * 60 * 1000, // 5 minutes - data doesn't change often
     refetchOnWindowFocus: false, // Don't refetch on tab focus
   });
+  const filteredLeagues = useMemo(() => leaguesPage?.leagues ?? [], [leaguesPage]);
+  const matchedLeagueCount = leaguesPage?.matched ?? 0;
+  const catalogLeagueCount = leaguesPage?.catalog ?? 0;
 
   // Fetch user's added leagues to check which ones are already in library
   const { data: userLeagues = [] } = useQuery({
@@ -120,14 +137,14 @@ export default function LeagueSearchPage() {
     queryFn: async () => {
       const response = await apiGet('/api/leagues');
       if (!response.ok) throw new Error('Failed to fetch user leagues');
-      return response.json();
+      return response.json() as Promise<LibraryLeague[]>;
     },
   });
 
   // Create a map of added leagues by external ID (includes logo URLs from database)
   const addedLeaguesMap = useMemo(() => {
     const map = new Map<string, AddedLeagueInfo & { logoUrl?: string }>();
-    (userLeagues as UserLeague[]).forEach((league) => {
+    userLeagues.forEach((league) => {
       if (league.externalId) {
         map.set(league.externalId, {
           id: league.id,
@@ -138,24 +155,6 @@ export default function LeagueSearchPage() {
     });
     return map;
   }, [userLeagues]);
-
-  // Filtering and ordering happen server-side now; what arrives is the page
-  // to draw.
-  const filteredLeagues = allLeagues;
-
-  // Apply column filters and column sort on top of filteredLeagues (compact table only)
-  const tableLeagues = useMemo(
-    () => applyTableSortFilter(filteredLeagues, colFilters, sortCol, sortDir, (col, item) => {
-      switch (col) {
-        case 'strLeague': return String(item.strLeague || '');
-        case 'strSport': return String(item.strSport || '');
-        case 'strCountry': return String(item.strCountry || '');
-        case 'intFormedYear': return String(item.intFormedYear || '');
-        default: return '';
-      }
-    }),
-    [filteredLeagues, colFilters, sortCol, sortDir]
-  );
 
   // The chips come from their own endpoint rather than from the page of
   // leagues on screen: that page moves with the filter, so deriving the chips
@@ -225,7 +224,7 @@ export default function LeagueSearchPage() {
       // tennis, badminton, table tennis, snooker) and fighting leagues that
       // monitor by event type (UFC, WWE, ONE) auto-monitor on add. Everything
       // else requires at least one selected team.
-      const monitored = isTeamlessSport(league.strSport, league.strLeague) ||
+      const monitored = isTeamlessSport(league.strSport, league.strLeague, league.strSportFormat) ||
         usesFightingEventTypes(league.strSport, league.strLeague) ||
         monitoredTeamIds.length > 0;
 
@@ -233,6 +232,7 @@ export default function LeagueSearchPage() {
         externalId: league.idLeague,
         name: league.strLeague,
         sport: league.strSport,
+        sportFormat: league.strSportFormat,
         country: league.strCountry,
         description: league.strDescriptionEN,
         monitored: monitored,
@@ -271,8 +271,8 @@ export default function LeagueSearchPage() {
     },
     onSuccess: (data, variables) => {
       const isMotorsportLeague = isMotorsport(variables.league.strSport);
-      const isGolfLeague = isGolf(variables.league.strSport);
-      const isIndividualTennisLeague = isIndividualTennis(variables.league.strSport, variables.league.strLeague);
+      const teamless = isTeamlessSport(variables.league.strSport, variables.league.strLeague, variables.league.strSportFormat)
+        || usesFightingEventTypes(variables.league.strSport, variables.league.strLeague);
       let message: string;
 
       if (isMotorsportLeague) {
@@ -280,7 +280,7 @@ export default function LeagueSearchPage() {
         message = sessionCount > 0
           ? `Added ${variables.league.strLeague} with ${sessionCount} monitored session type${sessionCount !== 1 ? 's' : ''}!`
           : `Added ${variables.league.strLeague} (all session types monitored)`;
-      } else if (isGolfLeague || isIndividualTennisLeague) {
+      } else if (teamless) {
         message = `Added ${variables.league.strLeague} (all events monitored)`;
       } else {
         const teamCount = variables.monitoredTeamIds.length;
@@ -328,6 +328,7 @@ export default function LeagueSearchPage() {
       searchQueryTemplate,
       tags,
       sport,
+      sportFormat,
       leagueName,
       monitorFinals,
       specialEventsMonitorType,
@@ -336,6 +337,9 @@ export default function LeagueSearchPage() {
       retentionDays,
       allowHighlights,
       sessionTypeQualityProfiles,
+      // rootFolderId and enableDvr are part of the modal's payload but not of
+      // an edit: moving a league is its own flow, and DVR has its own toggle
+      // on the league page, which ignores both here for the same reason.
     }: {
       leagueId: number;
       monitoredTeamIds: string[];
@@ -350,6 +354,7 @@ export default function LeagueSearchPage() {
       searchQueryTemplate?: string | null;
       tags?: number[];
       sport: string;
+      sportFormat?: string | null;
       leagueName: string;
       monitorFinals?: boolean;
       specialEventsMonitorType?: string;
@@ -362,12 +367,8 @@ export default function LeagueSearchPage() {
       enableDvr?: boolean;
     }) => {
       // Teamless sports auto-monitor; other sports require at least one selected team.
-      const isMotorsportLeague = isMotorsport(sport);
-      const isGolfLeague = isGolf(sport);
-      const isIndividualTennisLeague = isIndividualTennis(sport, leagueName);
-      const monitored = isTeamlessSport(sport, leagueName) ||
-        usesFightingEventTypes(sport, leagueName) ||
-        monitoredTeamIds.length > 0;
+      const teamless = isTeamlessSport(sport, leagueName, sportFormat) || usesFightingEventTypes(sport, leagueName);
+      const monitored = teamless || monitoredTeamIds.length > 0;
 
       // First update the league settings
       const settingsResponse = await apiPut(`/api/leagues/${leagueId}`, {
@@ -397,7 +398,7 @@ export default function LeagueSearchPage() {
       }
 
       // Then update the monitored teams (only for sports that use team selection)
-      if (!isMotorsportLeague && !isGolfLeague && !isIndividualTennisLeague) {
+      if (!teamless) {
         const teamsResponse = await apiPut(`/api/leagues/${leagueId}/teams`, {
           monitoredTeamIds: monitoredTeamIds.length > 0 ? monitoredTeamIds : null,
         });
@@ -414,8 +415,8 @@ export default function LeagueSearchPage() {
     },
     onSuccess: async (data, variables) => {
       const isMotorsportLeague = isMotorsport(variables.sport);
-      const isGolfLeague = isGolf(variables.sport);
-      const isIndividualTennisLeague = isIndividualTennis(variables.sport, variables.leagueName);
+      const teamless = isTeamlessSport(variables.sport, variables.leagueName, variables.sportFormat)
+        || usesFightingEventTypes(variables.sport, variables.leagueName);
       let message: string;
 
       if (isMotorsportLeague) {
@@ -423,7 +424,7 @@ export default function LeagueSearchPage() {
         message = partsCount > 0
           ? `Updated settings with ${partsCount} monitored session${partsCount !== 1 ? 's' : ''}`
           : 'League settings updated (no sessions selected)';
-      } else if (isGolfLeague || isIndividualTennisLeague) {
+      } else if (teamless) {
         message = 'League settings updated (all events monitored)';
       } else {
         const teamCount = data.teamCount || variables.monitoredTeamIds.length;
@@ -476,21 +477,18 @@ export default function LeagueSearchPage() {
   // Helper to open add modal with stable data stored in ref
   const openAddModal = (league: League) => {
     addModalDataRef.current = { league, leagueId: null, editMode: false };
-    setEditMode(false);
     setIsModalOpen(true);
   };
 
   // Helper to open edit modal with stable data stored in ref
   const openEditModal = (league: League, leagueId: number) => {
     addModalDataRef.current = { league, leagueId, editMode: true };
-    setEditMode(true);
     setIsModalOpen(true);
   };
 
   // Helper to close add/edit modal and clean up ref
   const closeAddModal = () => {
     setIsModalOpen(false);
-    setEditMode(false);
     // Clear ref after modal transition completes
     setTimeout(() => {
       addModalDataRef.current = null;
@@ -499,7 +497,7 @@ export default function LeagueSearchPage() {
 
   // Helper to open delete confirmation with stable data
   const openDeleteModal = (leagueId: number, leagueName: string) => {
-    const userLeague = (userLeagues as UserLeague[]).find((l) => l.id === leagueId);
+    const userLeague = userLeagues.find((l) => l.id === leagueId);
     const eventCount = userLeague?.eventCount || 0;
     deleteModalDataRef.current = { leagueId, leagueName, eventCount };
     setIsDeleteConfirmOpen(true);
@@ -552,6 +550,7 @@ export default function LeagueSearchPage() {
         searchQueryTemplate,
         tags,
         sport: league.strSport,
+        sportFormat: league.strSportFormat,
         leagueName: league.strLeague,
         monitorFinals,
         specialEventsMonitorType,
@@ -611,7 +610,7 @@ export default function LeagueSearchPage() {
     }
   };
 
-  const renderLeagueTable = (leagues: typeof tableLeagues) => (
+  const renderLeagueTable = (leagues: League[]) => (
     <CompactTableFrame>
         <thead>
           <tr className="text-xs text-gray-400 uppercase text-left border-b border-gray-700 bg-gray-950 sticky top-0">
@@ -740,7 +739,10 @@ export default function LeagueSearchPage() {
             <input
               type="text"
               value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+                setVisibleCount(LEAGUES_PAGE_SIZE);
+              }}
               placeholder="Filter leagues (e.g., UFC, Premier League, NBA)..."
               className="w-full pl-10 pr-4 py-2.5 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-red-600 focus:ring-1 focus:ring-red-600"
             />
@@ -748,7 +750,10 @@ export default function LeagueSearchPage() {
           {sportFilters.length > 1 && (
             <select
               value={selectedSport}
-              onChange={(e) => setSelectedSport(e.target.value)}
+              onChange={(e) => {
+                setSelectedSport(e.target.value);
+                setVisibleCount(LEAGUES_PAGE_SIZE);
+              }}
               className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2.5 text-sm text-white focus:border-red-600 focus:outline-none focus:ring-2 focus:ring-red-600/20 md:text-base"
               title="Filter by sport"
             >
@@ -761,7 +766,9 @@ export default function LeagueSearchPage() {
           )}
         </div>
         <p className="mb-4 text-sm text-gray-500 md:mb-6">
-          Showing {isLoading ? '...' : filteredLeagues.length} of {matchedLeagueCount} leagues
+          {isLoading
+            ? 'Loading leagues...'
+            : `Showing ${filteredLeagues.length.toLocaleString()} of ${matchedLeagueCount.toLocaleString()} ${matchedLeagueCount === 1 ? 'league' : 'leagues'}${matchedLeagueCount !== catalogLeagueCount ? ` (${catalogLeagueCount.toLocaleString()} total)` : ''}`}
           {searchQuery && ` matching "${searchQuery}"`}
           {selectedSport !== 'all' && ` in ${selectedSport}`}
         </p>
@@ -780,17 +787,17 @@ export default function LeagueSearchPage() {
         )}
 
         {/* Search Results */}
-        {!isLoading && filteredLeagues.length > 0 && (
+        {!isLoading && (filteredLeagues.length > 0 || hasColumnFilter) && (
           <div>
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-xl font-bold text-white">
                 {selectedSport === 'all' ? 'All Leagues' : `${selectedSport} Leagues`}
-                {' '}({filteredLeagues.length})
+                {' '}({matchedLeagueCount.toLocaleString()})
               </h2>
             </div>
 
             {compactView ? (
-              renderLeagueTable(tableLeagues)
+              renderLeagueTable(filteredLeagues)
             ) : (
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
                 {filteredLeagues.map(league => {
@@ -911,11 +918,23 @@ export default function LeagueSearchPage() {
                 })}
               </div>
             )}
+
+            {matchedLeagueCount > filteredLeagues.length && (
+              <div className="mt-6 flex justify-center">
+                <button
+                  type="button"
+                  onClick={() => setVisibleCount((count) => count + LEAGUES_PAGE_SIZE)}
+                  className={`${BUTTON_SECONDARY} min-h-11`}
+                >
+                  Show more ({(matchedLeagueCount - filteredLeagues.length).toLocaleString()} remaining)
+                </button>
+              </div>
+            )}
           </div>
         )}
 
         {/* Empty State */}
-        {!isLoading && filteredLeagues.length === 0 && (
+        {!isLoading && filteredLeagues.length === 0 && !hasColumnFilter && (
           <div className="text-center py-16">
             <TrophyIcon className="w-16 h-16 text-gray-600 mx-auto mb-4" />
             <h3 className="text-xl font-semibold text-gray-400 mb-2">

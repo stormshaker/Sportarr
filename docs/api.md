@@ -78,6 +78,7 @@ http://localhost:1867/api
 | GET | `/api/queue` | Get download queue |
 | GET | `/api/queue/{id}` | Get queue item |
 | DELETE | `/api/queue/{id}` | Remove from queue |
+| POST | `/api/download/completed` | [Notify Sportarr that a tracked download finished](APPLICATION_API.md#download-completion-notifications) |
 
 ### Download Clients
 
@@ -129,6 +130,7 @@ See [IPTV DVR Recording](features/iptv-dvr.md) for the full feature walkthrough.
 | GET | `/api/iptv/filtered.xml` | Filtered EPG (XMLTV) for external IPTV apps |
 | GET | `/api/iptv/stream/{channelId}` | Proxy a channel's live stream |
 | GET | `/api/dvr/recordings` | List DVR recordings |
+| PATCH | `/api/dvr/recordings/{id}/assignment` | Change a scheduled recording's channel, fallbacks, time window, or quality without replacing other fields |
 | GET | `/api/dvr/active` | Currently recording |
 | POST | `/api/dvr/events/{eventId}/schedule` | Schedule a recording for an event |
 | GET | `/api/dvr/settings` | DVR configuration |

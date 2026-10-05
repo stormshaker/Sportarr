@@ -144,6 +144,8 @@ public static class ServiceCollectionExtensions
         // transient failure produced a burst of four requests at whatever
         // speed the network allowed, right past the request delay the user
         // configured for that indexer.
+        services.AddTransient<IndexerQueryQuotaHandler>();
+        services.AddTransient<IndexerAttemptTimeoutHandler>();
         services.AddHttpClient("IndexerClient")
             .AddTransientHttpErrorPolicy(policyBuilder =>
                 policyBuilder.WaitAndRetryAsync(
@@ -153,28 +155,26 @@ public static class ServiceCollectionExtensions
                     {
                         Console.WriteLine($"[Indexer] Retry {retryCount} after {timespan.TotalSeconds}s due to {outcome.Exception?.Message ?? outcome.Result.StatusCode.ToString()}");
                     }))
-            .AddHttpMessageHandler<RateLimitHandler>()
+            .AddHttpMessageHandler<IndexerQueryQuotaHandler>()
+            // Per-attempt ceiling of Config.IndexerHttpTimeoutSeconds, inside
+            // the retry policy and below the pacer, so neither the backoff nor
+            // the wait for a pacing slot counts against a request.
+            .AddHttpMessageHandler<IndexerAttemptTimeoutHandler>()
             .ConfigureHttpClient((sp, client) =>
             {
-                // Config.IndexerHttpTimeoutSeconds, read fresh on every client
-                // creation (the (IServiceProvider, HttpClient) overload runs each
-                // time HttpClientFactory rotates a handler, not just once at
-                // startup), so a private tracker behind Cloudflare/FlareSolverr or
-                // a slow Usenet indexer can be given more than the 30s default
-                // without an app restart. Blocking here is safe: this callback
-                // runs outside any request's SynchronizationContext.
-                var timeoutSeconds = 30;
-                try
-                {
-                    var configService = sp.GetRequiredService<ConfigService>();
-                    var config = configService.GetConfigAsync().GetAwaiter().GetResult();
-                    timeoutSeconds = Math.Max(5, config.IndexerHttpTimeoutSeconds);
-                }
-                catch
-                {
-                    // Config not readable yet (very early startup) - keep the default.
-                }
-                client.Timeout = TimeSpan.FromSeconds(timeoutSeconds);
+                // The ceiling for the whole attempt chain, not one request. It
+                // used to be IndexerHttpTimeoutSeconds itself, which left the
+                // retries of a transient failure on a paced indexer too little
+                // time to be sent at all. It allows every attempt its full
+                // budget plus the 2s+4s+8s backoff, with room for pacing.
+                // Read fresh on every client creation (this overload runs each
+                // time HttpClientFactory rotates a handler), so a change to the
+                // setting applies without a restart. Blocking here is safe:
+                // this callback runs outside any request's SynchronizationContext.
+                var attemptTimeout = IndexerAttemptTimeoutHandler
+                    .AttemptTimeoutAsync(sp.GetService<ConfigService>())
+                    .GetAwaiter().GetResult();
+                client.Timeout = attemptTimeout * 4 + TimeSpan.FromMinutes(2);
                 client.DefaultRequestHeaders.UserAgent.ParseAdd("Sportarr/1.0");
             });
 
@@ -199,8 +199,10 @@ public static class ServiceCollectionExtensions
         services.AddHttpClient("StreamProxy")
             .ConfigurePrimaryHttpMessageHandler(sp => new SocketsHttpHandler
             {
-                AllowAutoRedirect = true,
-                MaxAutomaticRedirections = 10,
+                // Redirects are followed by the proxy endpoint so it can
+                // distinguish a usable final response from an unresolved or
+                // looping redirect instead of returning a bare 3xx to HLS.js.
+                AllowAutoRedirect = false,
                 PooledConnectionLifetime = TimeSpan.FromMinutes(1),
                 PooledConnectionIdleTimeout = TimeSpan.FromSeconds(30),
                 // SSRF guard: the stream proxy is reachable anonymously and fetches
@@ -375,6 +377,8 @@ public static class ServiceCollectionExtensions
         services.AddScoped<HealthCheckService>();
         services.AddScoped<BackupService>();
         services.AddScoped<NotificationService>();
+        services.AddScoped<INotificationService>(provider =>
+            provider.GetRequiredService<NotificationService>());
         // Singleton: holds the live SSE subscriber channels.
         services.AddSingleton<EventStreamService>();
         // Backup-restore reconciliation stack. PathRemap + LibraryRescan
@@ -392,6 +396,7 @@ public static class ServiceCollectionExtensions
 
     public static IServiceCollection AddSportarrIndexing(this IServiceCollection services)
     {
+        services.AddSingleton<DownloadOwnershipCoordinator>();
         services.AddScoped<DownloadClientService>();
         services.AddScoped<QueueRemovalService>();
         services.AddScoped<IndexerStatusService>();
@@ -423,6 +428,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<ImportFileSuppressionService>();
         services.AddScoped<SportsFileNameParser>();
         services.AddScoped<FileNamingService>();
+        services.AddScoped<EpisodeNumberResolver>();
         services.AddScoped<FileRenameService>();
         services.AddScoped<EventPartDetector>();
         services.AddScoped<FileFormatManager>();
@@ -454,6 +460,8 @@ public static class ServiceCollectionExtensions
         // the proxy/HDHomeRun path.
         services.AddSingleton<StreamSessionTracker>();
         services.AddScoped<DvrRecordingService>();
+        services.AddScoped<DvrAssignmentService>();
+        services.AddSingleton<DvrEarlyFinishGuard>();
         services.AddScoped<EventDvrService>();
         services.AddScoped<DvrQualityScoreCalculator>();
         services.AddScoped<XmltvParserService>();
@@ -471,12 +479,14 @@ public static class ServiceCollectionExtensions
     public static IServiceCollection AddSportarrBackgroundServices(this IServiceCollection services)
     {
         services.AddSingleton<TaskService>();
+        services.AddSingleton<ITaskService>(sp => sp.GetRequiredService<TaskService>());
         services.AddHostedService<TaskQueueRecoveryService>();
 
         services.AddSingleton<DiskScanService>();
         services.AddHostedService(sp => sp.GetRequiredService<DiskScanService>());
 
         services.AddHostedService<TrashSyncBackgroundService>();
+        services.AddSingleton<DownloadMonitorWakeSignal>();
         services.AddHostedService<EnhancedDownloadMonitorService>();
 
         // RssSyncService doubles as the decision engine for externally pushed
@@ -546,10 +556,16 @@ public static class ServiceCollectionExtensions
 
     public static IServiceCollection AddSportarrDatabase(this IServiceCollection services, IConfiguration configuration, string dbPath)
     {
+        // One tracker for the whole process. The interceptor writes to it and
+        // the health surfaces read it, so a damaged database is reported from
+        // in-memory state that still answers when no query can run.
+        var databaseHealth = new Sportarr.Api.Services.DatabaseHealthTracker();
+        services.AddSingleton(databaseHealth);
+
         // Single shared interceptor instance. It only does work inside a
         // SyncMetrics measured block (one AsyncLocal read otherwise), so it
         // is safe to attach to every context including the request path.
-        var commandCounter = new Sportarr.Api.Data.CommandCountingInterceptor();
+        var commandCounter = new Sportarr.Api.Data.CommandCountingInterceptor(databaseHealth);
         var dbSettings = DatabaseSettings.FromConfiguration(configuration);
 
         void ConfigureProvider(DbContextOptionsBuilder options)

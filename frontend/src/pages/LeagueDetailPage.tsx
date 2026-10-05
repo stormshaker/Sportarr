@@ -1,5 +1,6 @@
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useQueries, useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { isAxiosError } from 'axios';
 import { ArrowLeftIcon, MagnifyingGlassIcon, ChevronDownIcon, ChevronRightIcon, UserIcon, ArrowPathIcon, UsersIcon, TrashIcon, FilmIcon, FolderOpenIcon, ExclamationTriangleIcon, SignalIcon, VideoCameraIcon, TagIcon, EllipsisHorizontalIcon } from '@heroicons/react/24/outline';
 import { CheckCircleIcon, CheckIcon } from '@heroicons/react/24/solid';
 import { useState, useEffect, useRef, useMemo } from 'react';
@@ -12,6 +13,8 @@ import EventFileDetailModal from '../components/EventFileDetailModal';
 import LeagueFilesModal from '../components/LeagueFilesModal';
 import TeamAliasesModal from '../components/TeamAliasesModal';
 import EventStatusBadge from '../components/EventStatusBadge';
+import { EVENTS_PER_PAGE, nextSeasonRenderLimit, seasonRenderLimit } from '../utils/seasonPaging';
+import { getEventLifecycle } from '../utils/eventStatus';
 import ManualImportModal from '../components/ManualImportModal';
 import RefreshScopeModal, { type RefreshScope } from '../components/RefreshScopeModal';
 import { useSearchQueueStatus, useDownloadQueue, useTasks } from '../api/hooks';
@@ -26,14 +29,13 @@ import { PAGE_PADDING, BUTTON_PRIMARY, BUTTON_SECONDARY, BUTTON_SUCCESS } from '
 // row that runs off the card.
 const HEADER_ACTION = 'w-full min-w-0 max-sm:gap-1 max-sm:px-1.5 max-sm:text-[11px]';
 import { isFightingSport, isTeamlessSport, usesFightingEventTypes } from '../utils/leagueSportRules';
-import { errorMessage } from '../utils/errors';
-import type { League as AddLeagueModalLeague } from '../components/AddLeagueModal';
 
 // Type for the league prop passed to AddLeagueModal
 interface ModalLeagueData {
   idLeague: string;
   strLeague: string;
   strSport: string;
+  strSportFormat?: string | null;
   strCountry?: string;
   strLeagueAlternate?: string;
   strDescriptionEN?: string;
@@ -65,6 +67,7 @@ interface LeagueDetail {
   externalId?: string;
   name: string;
   sport: string;
+  sportFormat?: string | null;
   country?: string;
   description?: string;
   monitored: boolean;
@@ -192,6 +195,7 @@ interface EventDetail {
   externalId?: string;
   title: string;
   sport: string;
+  sportFormat?: string | null;
   leagueId?: number;
   leagueName?: string;
   homeTeamId?: number;
@@ -280,13 +284,6 @@ function fuzzyMatch(text: string, search: string): boolean {
   return searchIndex >= searchLower.length * 0.7;
 }
 
-// An expanded season renders every event it holds. That is fine for a team
-// sport, where a season is a few hundred games, and not fine for an individual
-// one: an ATP or WTA season is 2,000-2,700 matches because every match in every
-// tournament is its own event, which put 65,000 nodes on the page from a single
-// click. Events arrive with the season, so this is purely about how many of
-// them reach the DOM at once.
-const EVENTS_PER_PAGE = 200;
 
 export default function LeagueDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -342,11 +339,8 @@ export default function LeagueDetailPage() {
   // a season you had scrolled into does not throw the extra rows away.
   const [seasonRenderLimits, setSeasonRenderLimits] = useState<Record<string, number>>({});
 
-  const showMoreEvents = (season: string, total: number) =>
-    setSeasonRenderLimits((prev) => ({
-      ...prev,
-      [season]: Math.min((prev[season] ?? EVENTS_PER_PAGE) + EVENTS_PER_PAGE, total),
-    }));
+  const showMoreEvents = (season: string, shown: number, total: number) =>
+    setSeasonRenderLimits((prev) => ({ ...prev, [season]: nextSeasonRenderLimit(shown, total) }));
 
   // Deep-history leagues carry decades of catalog seasons; old ones the user
   // never touched are hidden behind a "Show all seasons" toggle (see
@@ -363,7 +357,6 @@ export default function LeagueDetailPage() {
   // Reveals events the league's own monitoring choices hide: sessions the
   // user does not follow, and games without a followed team. Needed to find
   // a one-off event and monitor it by hand.
-  const [showAllEvents, setShowAllEvents] = useState(false);
   // Held locally so the list reorders on click, then saved to the league so it
   // survives a reload and follows the user to another browser.
   const [sortOldestFirst, setSortOldestFirst] = useState(false);
@@ -408,9 +401,11 @@ export default function LeagueDetailPage() {
 
   // Adopt the league's saved order once it arrives. Keyed on the league id so
   // switching leagues picks up that league's choice.
+  const leagueId = league?.id;
+  const leagueSortOrder = league?.eventSortOrder;
   useEffect(() => {
-    if (league) setSortOldestFirst(league.eventSortOrder === 'asc');
-  }, [league?.id, league?.eventSortOrder]);
+    if (leagueId != null) setSortOldestFirst(leagueSortOrder === 'asc');
+  }, [leagueId, leagueSortOrder]);
 
   const toggleSortOrder = async () => {
     const next = !sortOldestFirst;
@@ -436,10 +431,10 @@ export default function LeagueDetailPage() {
   // until one is opened, and a league with thousands of events answered
   // megabytes for a list that only needs counts.
   const { data: seasonSummary, isLoading: eventsLoading } = useQuery({
-    queryKey: ['league-seasons', id, showAllEvents],
+    queryKey: ['league-seasons', id],
     queryFn: async () => {
       const response = await apiClient.get<LeagueSeasonSummary>(
-        `/leagues/${id}/seasons${showAllEvents ? '?showAll=true' : ''}`);
+        `/leagues/${id}/seasons`);
       return response.data;
     },
     enabled: !!id,
@@ -475,10 +470,10 @@ export default function LeagueDetailPage() {
   const expandedSeasonList = useMemo(() => [...expandedSeasons], [expandedSeasons]);
   const seasonEventQueries = useQueries({
     queries: expandedSeasonList.map((season) => ({
-      queryKey: ['league-season-events', id, season, showAllEvents],
+      queryKey: ['league-season-events', id, season],
       queryFn: async () => {
         const response = await apiClient.get<EventDetail[]>(
-          `/leagues/${id}/events?season=${encodeURIComponent(season)}${showAllEvents ? '&showAll=true' : ''}`);
+          `/leagues/${id}/events?season=${encodeURIComponent(season)}`);
         return response.data;
       },
       enabled: !!id,
@@ -877,7 +872,7 @@ export default function LeagueDetailPage() {
       // picker, so they must be treated as teamless when computing `monitored` —
       // otherwise an empty monitoredTeamIds array forces the league off and
       // overrides the user's event-type selection.
-      const treatAsTeamless = sport ? (isTeamlessSport(sport, name) || usesFightingEventTypes(sport, name)) : false;
+      const treatAsTeamless = sport ? (isTeamlessSport(sport, name, league?.sportFormat) || usesFightingEventTypes(sport, name)) : false;
 
       // Build the payload - only include monitored if monitoredTeamIds was explicitly provided
       // This prevents inline settings changes (like monitorType dropdown) from accidentally
@@ -937,7 +932,8 @@ export default function LeagueDetailPage() {
       navigate('/leagues');
     },
     onError: (error: unknown) => {
-      toast.error(errorMessage(error, 'Failed to delete league'));
+      const errorMessage = isAxiosError<{ error?: string }>(error) ? error.response?.data?.error : undefined;
+      toast.error(errorMessage || 'Failed to delete league');
     },
   });
 
@@ -974,7 +970,8 @@ export default function LeagueDetailPage() {
       toast.success(data.message || 'File deleted');
     },
     onError: (error: unknown) => {
-      toast.error(errorMessage(error, 'Failed to delete file'));
+      const detail = isAxiosError<{ detail?: string }>(error) ? error.response?.data?.detail : undefined;
+      toast.error(detail || 'Failed to delete file');
     },
   });
 
@@ -998,7 +995,7 @@ export default function LeagueDetailPage() {
 
 
   const handleEditLeagueSettings = (
-    league: AddLeagueModalLeague,
+    league: unknown,
     monitoredTeamIds: string[],
     monitorType: string,
     qualityProfileId: number | null,
@@ -1060,6 +1057,7 @@ export default function LeagueDetailPage() {
           idLeague: league.externalId,
           strLeague: league.name,
           strSport: league.sport,
+          strSportFormat: league.sportFormat,
           strCountry: league.country,
           strLeagueAlternate: undefined,
           strDescriptionEN: league.description,
@@ -1706,7 +1704,7 @@ export default function LeagueDetailPage() {
                     onClick={() => setLeagueMenuOpen(false)}
                     aria-hidden="true"
                   />
-                  <div className="absolute left-0 top-full z-50 mt-2 w-64 animate-pill-down">
+                  <div className="absolute right-0 top-full z-50 mt-2 w-64 animate-pill-down">
                     <div
                       role="menu"
                       className="max-h-[75dvh] overflow-y-auto rounded-2xl border-2 border-red-900/70 bg-gradient-to-b from-gray-900 to-black shadow-2xl shadow-black/40"
@@ -1958,8 +1956,22 @@ export default function LeagueDetailPage() {
         <div className="bg-gradient-to-br from-gray-900 to-black border border-red-900/30 rounded-lg overflow-hidden">
           <div className="p-4 md:p-6 border-b border-red-900/30">
             <h2 className="text-xl md:text-2xl font-bold text-white">Events</h2>
+            {/* The stat card above counts what the library stores. This
+                line counts what passes the league's own filters, across
+                every season. Both numbers are shown when they differ, or
+                one looks like the other one is wrong. It does not count
+                what is on screen: collapsed seasons and the cancelled
+                toggle change the rows, not this. */}
             <p className="text-gray-400 text-xs md:text-sm mt-1">
-              {totalEventCount} event{totalEventCount !== 1 ? 's' : ''} in this league
+              {league.eventCount > totalEventCount ? (
+                <>
+                  {totalEventCount.toLocaleString()} of {league.eventCount.toLocaleString()} stored events match what you follow
+                </>
+              ) : (
+                <>
+                  {totalEventCount.toLocaleString()} event{totalEventCount !== 1 ? 's' : ''} in this league
+                </>
+              )}
             </p>
 
             {/* Show-cancelled toggle. Hidden by default because cancelled
@@ -1983,19 +1995,6 @@ export default function LeagueDetailPage() {
                 </label>
               );
             })()}
-
-            <label className="flex items-center gap-2 mt-2 text-xs text-gray-400 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={showAllEvents}
-                onChange={(e) => setShowAllEvents(e.target.checked)}
-                className="rounded text-red-600 focus:ring-red-500 bg-gray-800 border-gray-600"
-              />
-              Show every event
-              <span className="text-gray-500">
-                (including sessions and teams you do not follow)
-              </span>
-            </label>
 
             <label className="flex items-center gap-2 mt-2 text-xs text-gray-400 cursor-pointer select-none">
               <input
@@ -2060,8 +2059,12 @@ export default function LeagueDetailPage() {
               {/* Season Groups */}
               {visibleSeasons.map(season => {
                 const seasonEvents = groupedEvents[season] ?? [];
-                const seasonRenderLimit = seasonRenderLimits[season] ?? EVENTS_PER_PAGE;
-                const visibleSeasonEvents = seasonEvents.slice(0, seasonRenderLimit);
+                const renderLimit = seasonRenderLimit(
+                  seasonRenderLimits[season],
+                  seasonEvents,
+                  deepLinkedEvent && (deepLinkedEvent.season || 'Unknown') === season ? deepLinkedEvent.id : null
+                );
+                const visibleSeasonEvents = seasonEvents.slice(0, renderLimit);
                 const hiddenSeasonEventCount = seasonEvents.length - visibleSeasonEvents.length;
                 const isExpanded = expandedSeasons.has(season);
                 const summaryRow = seasonRows.find(row => row.season === season);
@@ -2340,24 +2343,11 @@ export default function LeagueDetailPage() {
                         <div className="divide-y divide-red-900/20">
                           {visibleSeasonEvents.map(event => {
                             const hasFile = event.hasFile;
-                            const eventDate = new Date(event.eventDate);
-                            const now = new Date();
-                            const isPastEvent = eventDate < now;
-                            const status = event.status?.toUpperCase();
-                            // 'cancelled' / 'postponed' get their own badge -- the previous
-                            // `isNotStarted = !isCompleted && !isLive` fallback was rendering
-                            // them as "Not Started", which is misleading: a cancelled game
-                            // never happens.
-                            const isCancelled = status === 'CANCELLED' || status === 'CANCELED';
-                            const isPostponed = status === 'POSTPONED';
-                            // 'SCHEDULED' belongs in the past-date fallback with
-                            // 'NS' / 'NOT STARTED': it is the pre-match status the
-                            // hub actually serves, and it is not always advanced
-                            // once a match finishes -- plenty of events carry a
-                            // final score while still reporting 'scheduled'. Without
-                            // it those render "Not Started" days after the result.
-                            const isCompleted = hasFile || status === 'FT' || status === 'COMPLETED' || status === 'MATCH FINISHED' || (isPastEvent && (!status || status === 'NS' || status === 'NOT STARTED' || status === 'SCHEDULED'));
-                            const isLive = status === 'LIVE';
+                            const lifecycle = getEventLifecycle({ status: event.status, eventDate: event.eventDate, hasFile });
+                            const isCancelled = lifecycle === 'cancelled';
+                            const isPostponed = lifecycle === 'postponed';
+                            const isCompleted = lifecycle === 'completed';
+                            const isLive = lifecycle === 'live';
                             const hasParts = config?.enableMultiPartEpisodes && isFightingSport(event.sport) && eventHasMultiPart(event);
 
                             return (
@@ -2627,7 +2617,7 @@ export default function LeagueDetailPage() {
                         {hiddenSeasonEventCount > 0 && (
                           <div className="border-t border-red-900/20 px-3 py-2 text-center">
                             <button
-                              onClick={() => showMoreEvents(season, seasonEvents.length)}
+                              onClick={() => showMoreEvents(season, renderLimit, seasonEvents.length)}
                               className="text-sm text-red-400 transition-colors hover:text-red-300"
                             >
                               Show {Math.min(EVENTS_PER_PAGE, hiddenSeasonEventCount)} more
@@ -2736,21 +2726,14 @@ export default function LeagueDetailPage() {
                             </span>
                           )}
 
-                          {/* Status badge - infer from date if not set */}
+                          {/* Status badge - the clock fills in what the status has not caught up with */}
                           {(() => {
-                            const eventDate = new Date(event.eventDate);
-                            const now = new Date();
-                            const isPast = eventDate < now;
-                            const status = event.status?.toUpperCase();
-                            const isCancelled = status === 'CANCELLED' || status === 'CANCELED';
-                            const isPostponed = status === 'POSTPONED';
-                            // Event is completed if: has file, OR explicit completed status, OR past date with unstarted/no status
-                            // 'SCHEDULED' counts as unstarted here for the same reason
-                            // as in the event list above: the hub leaves it in place on
-                            // plenty of finished events, score and all.
-                            const isCompleted = event.hasFile || status === 'FT' || status === 'COMPLETED' || status === 'MATCH FINISHED' || (isPast && (!status || status === 'NS' || status === 'NOT STARTED' || status === 'SCHEDULED'));
-                            const isLive = status === 'LIVE';
-                            const isNotStarted = !isCompleted && !isLive && !isCancelled && !isPostponed;
+                            const lifecycle = getEventLifecycle({ status: event.status, eventDate: event.eventDate, hasFile: event.hasFile });
+                            const isCancelled = lifecycle === 'cancelled';
+                            const isPostponed = lifecycle === 'postponed';
+                            const isCompleted = lifecycle === 'completed';
+                            const isLive = lifecycle === 'live';
+                            const isNotStarted = lifecycle === 'upcoming';
 
                             if (isCancelled) {
                               return (
@@ -3071,7 +3054,7 @@ export default function LeagueDetailPage() {
                         {hiddenSeasonEventCount > 0 && (
                           <div className="border-t border-red-900/30 px-3 py-3 text-center">
                             <button
-                              onClick={() => showMoreEvents(season, seasonEvents.length)}
+                              onClick={() => showMoreEvents(season, renderLimit, seasonEvents.length)}
                               className="text-sm text-red-400 transition-colors hover:text-red-300"
                             >
                               Show {Math.min(EVENTS_PER_PAGE, hiddenSeasonEventCount)} more

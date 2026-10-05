@@ -23,6 +23,16 @@ public class FileNamingService
         _logger = logger;
     }
 
+    public static string GetOriginalFilenameToken(string sourceFile)
+    {
+        return Path.GetFileNameWithoutExtension(GetSourceFilename(sourceFile));
+    }
+
+    public static string GetSourceFilename(string sourceFile)
+    {
+        return Path.GetFileName(sourceFile);
+    }
+
     /// <summary>
     /// Build filename from format template and tokens
     /// </summary>
@@ -59,7 +69,7 @@ public class FileNamingService
 
     /// <summary>
     /// Build complete folder path using granular folder settings
-    /// Respects CreateLeagueFolders, CreateSeasonFolders, and CreateEventFolders settings
+    /// Respects the league, season, type, and event folder settings.
     /// </summary>
     /// <param name="settings">Media management settings with folder options</param>
     /// <param name="eventInfo">Event to build path for</param>
@@ -89,6 +99,13 @@ public class FileNamingService
             {
                 pathParts.Add(seasonFolder);
             }
+        }
+
+        if (settings.CreateLeagueFolders && settings.CreateSeasonFolders && settings.CreateEventTypeFolders)
+        {
+            var eventTypeFolder = EventFolderGroupResolver.Resolve(eventInfo);
+            if (!string.IsNullOrWhiteSpace(eventTypeFolder))
+                pathParts.Add(CleanFileName(eventTypeFolder, settings.ReplaceIllegalCharacters));
         }
 
         // Event folder (e.g., "UFC 310 (2024-12-14) E45") - only if season folders are enabled.
@@ -184,10 +201,11 @@ public class FileNamingService
     /// from old installs produce an empty string rather than a junk token.
     /// </summary>
     // The token writes the branded form, sportarr-ev-2338110, with no
-    // braces. Every reader (imports, rescans, the parser) accepts it. The
-    // media-server agents never read it at all: they match a show by its
-    // folder name and an event by the season and episode numbers in the
-    // file name. Braces in a file name only ever raised questions.
+    // braces. Every reader (imports, rescans, the parser, the media-server
+    // agents) accepts it. The agents match a file by this id first, the way
+    // a tvdb id names a show; the season and episode numbers are the
+    // fallback for a file that carries none. Braces in a file name only
+    // ever raised questions.
     internal static string FormatSportarrIdToken(string? externalId)
     {
         return !string.IsNullOrEmpty(externalId)

@@ -37,29 +37,6 @@ interface Fighter {
   updatedAt: string;
 }
 
-// The body POSTed to /events. Named so a field added to the request has to
-// be declared, rather than silently riding along on an any.
-interface AddEventPayload {
-  title: string;
-  sport: string;
-  eventDate: string;
-  venue?: string;
-  location?: string;
-  monitored: boolean;
-  qualityProfileId: number;
-  searchOnAdd: boolean;
-  externalId?: string;
-  broadcast?: string;
-  status?: string;
-  season?: string;
-  round?: string;
-  leagueId?: number;
-  homeTeamId?: number;
-  awayTeamId?: number;
-}
-
-export type AddEventModalEvent = AddEventModalProps['event'];
-
 interface AddEventModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -88,14 +65,11 @@ interface AddEventModalProps {
     }[];
 
     // Team sports specific
-    // Only id, name and sport are read here; the TV-schedule page passes a
-    // summary rather than a full League row, and demanding one it does not
-    // have would only push a cast onto the caller.
-    league?: Pick<League, 'id' | 'name' | 'sport'>;
+    league?: League;
     leagueId?: number;
-    homeTeam?: Pick<Team, 'id' | 'name' | 'shortName'>;
+    homeTeam?: Team;
     homeTeamId?: number;
-    awayTeam?: Pick<Team, 'id' | 'name' | 'shortName'>;
+    awayTeam?: Team;
     awayTeamId?: number;
   };
   onSuccess: () => void;
@@ -138,7 +112,9 @@ export default function AddEventModal({ isOpen, onClose, event, onSuccess }: Add
 
   const formatDate = (dateString: string) => {
     try {
-      const date = new Date(dateString);
+      // A date without a time is a calendar date, not midnight UTC. Parsing
+      // it as UTC moves it to the prior day in western time zones.
+      const date = new Date(dateString.includes('T') ? dateString : `${dateString}T00:00:00`);
       return date.toLocaleDateString('en-US', {
         weekday: 'long',
         year: 'numeric',
@@ -176,7 +152,7 @@ export default function AddEventModal({ isOpen, onClose, event, onSuccess }: Add
     setIsAdding(true);
     try {
       // UNIVERSAL: Build request payload for all sports
-      const payload: AddEventPayload = {
+      const payload: any = {
         title: event.title,
         sport: sport,
         eventDate: event.eventDate,

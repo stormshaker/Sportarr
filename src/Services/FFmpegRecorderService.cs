@@ -562,10 +562,14 @@ public class FFmpegRecorderService
     /// disposed. The watchdog leaves it alone in the meantime.
     /// </summary>
     public IDisposable BeginFinalizing(int recordingId)
+        => TryBeginFinalizing(recordingId) ?? throw new InvalidOperationException("Recording is already being finalized.");
+
+    public IDisposable? TryBeginFinalizing(int recordingId)
     {
         lock (_lock)
         {
-            _finalizingRecordings.Add(recordingId);
+            if (!_finalizingRecordings.Add(recordingId))
+                return null;
         }
 
         return new FinalizingScope(this, recordingId);

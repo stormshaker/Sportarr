@@ -40,6 +40,82 @@ Check `appName` to confirm you are talking to Sportarr, and compare the
 version against the minimum your integration requires. Versions are numeric
 dot-separated segments; compare segment-wise.
 
+## Scheduled DVR assignments
+
+`PATCH /api/dvr/recordings/{id}/assignment` changes only the fields included
+in the JSON body of a scheduled recording. Use `expectedChannelId` to reject
+a stale channel choice instead of overwriting a newer assignment.
+
+```json
+{
+  "expectedChannelId": 12,
+  "channelId": 14,
+  "fallbackChannelIds": [16, 18],
+  "scheduledStart": "2027-01-01T18:00:00Z",
+  "scheduledEnd": "2027-01-01T21:00:00Z",
+  "quality": "HDTV-1080p"
+}
+```
+
+All fields are optional. Omitted fields keep their current values. Send
+`"fallbackChannelIds": []` to clear the fallback list. The normal recording
+response also includes `fallbackChannelIds`, even when the list is empty.
+Times are stored in UTC. The start must precede the end, and a live recording
+cannot be moved into a window that has already ended. Every assigned channel
+must be enabled and belong to an active source. Catchup assignments also
+require archive-capable Xtream channels.
+
+The response includes `recordingId`, `previous`, and `current` assignment
+objects. A successful update returns 200. Invalid assignments return 400,
+unknown recordings return 404, and stale or non-scheduled recordings return
+409. No assignment fields change on a rejected request.
+
+## Download completion notifications
+
+`POST /api/download/completed` requests a check of tracked downloads when a
+client finishes a job. Authenticate with Sportarr's API key and send JSON.
+
+```json
+{ "downloadId": "client-job-id", "downloadClientId": 3 }
+```
+
+`downloadId` is required, must contain non-whitespace text, and cannot exceed
+512 characters. Sportarr trims surrounding whitespace and matches the ID
+case-insensitively. `downloadClientId` is optional. When supplied, it must be
+a positive Sportarr download-client ID and restricts the lookup to that client.
+Use it when multiple clients can return the same job ID.
+
+| HTTP status | Response | Meaning |
+|---|---|---|
+| 200 | `{"matched":true,"queued":true}` | A matching active download requested a monitor check |
+| 200 | `{"matched":true,"queued":false}` | Matches exist, but all are imported or have exhausted their retry limits |
+| 200 | `{"matched":false,"queued":false}` | No tracked download matches the supplied identifiers |
+| 400 | Validation error | The body or identifiers are invalid |
+| 401 | Authentication error | The API key is missing or invalid |
+
+The response acknowledges the request, not a completed import. The existing
+background monitor checks client status before importing and keeps the normal
+completed-download handling settings, import rules, and retry limits. It does
+not trust the callback as proof that files are ready. Send the notification
+after the client reports the job complete.
+
+Repeated notifications share one pending check. Checks run serially and start
+at least five seconds apart. A notification can wake a check of other active
+downloads too. Once accepted, the check does not depend on the HTTP connection
+remaining open. Normal polling continues if notifications are unavailable,
+arrive before completion, or arrive before the job is tracked.
+
+```sh
+curl --fail --silent --show-error --max-time 10 \
+  -H 'X-Api-Key: YOUR_SPORTARR_API_KEY' \
+  -H 'Content-Type: application/json' \
+  --data '{"downloadId":"client-job-id","downloadClientId":3}' \
+  http://sportarr:1867/api/download/completed
+```
+
+Use a Sportarr address reachable from the download client's container or host.
+Include Sportarr's URL base in the address if configured.
+
 ## Indexer management
 
 Minimum version: the first release at or above 4.0.1023 (single reads, schema

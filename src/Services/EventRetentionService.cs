@@ -152,8 +152,19 @@ public class EventRetentionService : BackgroundService
 
             foreach (var file in evt.Files.ToList())
             {
+                string? recycledVideoPath = null;
                 if (!File.Exists(file.FilePath))
                 {
+                    if (useRecycleBin)
+                        recycledVideoPath = Sportarr.Api.Helpers.RecyclePaths.FindFree(recycleBinPath!, Path.GetFileName(file.FilePath));
+                    try
+                    {
+                        await metadataWriterService.DeleteEventMetadataAsync(file, recycledVideoPath);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "[Event Retention] Failed to remove orphaned sidecars for: {FilePath}", file.FilePath);
+                    }
                     removableFiles.Add(file);
                     continue;
                 }
@@ -165,6 +176,7 @@ public class EventRetentionService : BackgroundService
                         var fileName = Path.GetFileName(file.FilePath);
                         var recyclePath = Sportarr.Api.Helpers.RecyclePaths.FindFree(recycleBinPath!, fileName);
                         File.Move(file.FilePath, recyclePath);
+                        recycledVideoPath = recyclePath;
                     }
                     else
                     {
@@ -181,7 +193,7 @@ public class EventRetentionService : BackgroundService
 
                 try
                 {
-                    await metadataWriterService.DeleteEventMetadataAsync(file);
+                    await metadataWriterService.DeleteEventMetadataAsync(file, recycledVideoPath);
                 }
                 catch (Exception ex)
                 {
@@ -196,7 +208,6 @@ public class EventRetentionService : BackgroundService
                 var keptFiles = evt.Files.Except(removableFiles).ToList();
                 if (keptFiles.Count == 0)
                 {
-                    evt.HasFile = false;
                     evt.FilePath = null;
                     evt.FileSize = null;
                     evt.Quality = null;
@@ -211,6 +222,12 @@ public class EventRetentionService : BackgroundService
                     _logger.LogWarning("[Event Retention] Event {EventId} keeps {Count} file(s) that could not be removed",
                         evt.Id, keptFiles.Count);
                 }
+
+                evt.HasFile = EventPartDetector.AreAllMonitoredPartsPresent(
+                    evt.Sport, evt.Title, evt.League?.Name,
+                    evt.MonitoredParts, evt.League?.MonitoredParts,
+                    keptFiles.Where(f => f.Exists && File.Exists(f.FilePath))
+                        .Select(f => f.PartNumber).ToArray(), config.EnableMultiPartEpisodes);
 
                 // Report only what actually went.
                 deletedFilesData = removableFiles

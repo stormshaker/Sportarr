@@ -1,24 +1,21 @@
 import { useState, useEffect, useMemo, useRef, Fragment } from 'react';
 import { toast } from 'sonner';
 import { Dialog, Transition } from '@headlessui/react';
-import { MagnifyingGlassIcon, XMarkIcon, CheckIcon } from '@heroicons/react/24/outline';
+import { MagnifyingGlassIcon, XMarkIcon, CheckIcon, InformationCircleIcon, ExclamationTriangleIcon, ChevronDownIcon } from '@heroicons/react/24/outline';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiDelete, apiGet, apiPost } from '../utils/api';
 import { BUTTON_PRIMARY, BUTTON_SECONDARY } from '../utils/designTokens';
+import { PortalTooltip } from './PortalTooltip';
 import {
   isFightingSport,
   isMotorsport,
-  isGolf,
-  isDarts,
-  isClimbing,
-  isGambling,
-  isIndividualRacketOrCueSport,
-  isIndividualTennis,
+  isTeamlessSport,
   usesFightingEventTypes,
   getPartOptions,
 } from '../utils/leagueSportRules';
 import ConfirmationModal from './ConfirmationModal';
 import TagSelector from './TagSelector';
+import { isOlderGroupForcedOpen, partitionTeamsByRecency } from '../utils/teamRecency';
 
 interface Team {
   idTeam: string;
@@ -27,10 +24,11 @@ interface Team {
   strTeamShort?: string;
 }
 
-export interface League {
+interface League {
   idLeague: string;
   strLeague: string;
   strSport: string;
+  strSportFormat?: string | null;
   strCountry?: string;
   strLeagueAlternate?: string;
   strDescriptionEN?: string;
@@ -93,13 +91,6 @@ interface AddLeagueModalProps {
 // Sport-classification helpers live in utils/leagueSportRules so the modal's
 // display logic and the league pages' save logic share one source of truth.
 
-// A league-to-team join row: the team is only present when the row still
-// resolves to one, which is why the filter checks for it.
-interface MonitoredTeamLink {
-  monitored: boolean;
-  team?: { externalId: string };
-}
-
 export default function AddLeagueModal({ league, isOpen, onClose, onAdd, isAdding, editMode = false, leagueId }: AddLeagueModalProps) {
   const [selectedTeamIds, setSelectedTeamIds] = useState<Set<string>>(new Set());
   const [selectAll, setSelectAll] = useState(false);
@@ -126,8 +117,8 @@ export default function AddLeagueModal({ league, isOpen, onClose, onAdd, isAddin
   const [searchForCutoffUnmetEvents, setSearchForCutoffUnmetEvents] = useState(false);
   // For fighting sports: default to all parts selected
   const [monitoredParts, setMonitoredParts] = useState<Set<string>>(new Set());
-  const [, setSelectAllParts] = useState(false);
-  const [applyMonitoredPartsToEvents] = useState(true);
+  const [selectAllParts, setSelectAllParts] = useState(false);
+  const [applyMonitoredPartsToEvents, setApplyMonitoredPartsToEvents] = useState(true);
   // For motorsports: session types to monitor (default to all selected)
   // Note: selectAllSessionTypes starts false to match empty Set, will be set true when availableSessionTypes loads
   const [monitoredSessionTypes, setMonitoredSessionTypes] = useState<Set<string>>(new Set());
@@ -158,6 +149,7 @@ export default function AddLeagueModal({ league, isOpen, onClose, onAdd, isAddin
 
   // enable team based filtering on league add --> teams to monitor
   const [searchQuery, setSearchQuery] = useState('');
+  const [showEarlierTeams, setShowEarlierTeams] = useState(false);
 
   // Track initialization state to prevent re-initialization when queries complete
   // or other dependencies change. We track separately for teams and settings.
@@ -170,18 +162,19 @@ export default function AddLeagueModal({ league, isOpen, onClose, onAdd, isAddin
 
   // Fetch teams for the league when modal opens (not for motorsports)
   const { data: teamsResponse, isLoading: isLoadingTeams } = useQuery({
-    queryKey: ['league-teams', league?.idLeague],
+    queryKey: ['league-team-selection', league?.idLeague],
     queryFn: async () => {
       if (!league?.idLeague) return null;
-      const response = await apiGet(`/api/leagues/external/${league.idLeague}/teams`);
+      const response = await apiGet(`/api/leagues/external/${league.idLeague}/team-selection`);
       if (!response.ok) throw new Error('Failed to fetch teams');
       return response.json();
     },
-    enabled: isOpen && !!league && !isMotorsport(league.strSport) && !isGolf(league.strSport) && !isDarts(league.strSport) && !isClimbing(league.strSport) && !isGambling(league.strSport) && !isIndividualRacketOrCueSport(league.strSport) && !isIndividualTennis(league.strSport, league.strLeague),
+    enabled: isOpen && !!league && !isTeamlessSport(league.strSport, league.strLeague, league.strSportFormat),
     staleTime: 5 * 60 * 1000,
   });
 
-  const teams: Team[] = useMemo(() => teamsResponse || [], [teamsResponse]);
+  const teams: Team[] = teamsResponse?.teams || [];
+  const recentTeamIds: string[] = teamsResponse?.recentTeamIds || [];
 
   // Fetch quality profiles
   const { data: qualityProfiles = [] } = useQuery({
@@ -231,7 +224,7 @@ export default function AddLeagueModal({ league, isOpen, onClose, onAdd, isAddin
     staleTime: 5 * 60 * 1000,
   });
 
-  const availableSessionTypes: string[] = useMemo(() => sessionTypesResponse || [], [sessionTypesResponse]);
+  const availableSessionTypes: string[] = sessionTypesResponse || [];
 
   // Fetch fighting event types for UFC-style leagues (PPV, Fight Night, DWCS)
   const { data: eventTypesResponse, isPending: eventTypesPending } = useQuery({
@@ -246,7 +239,7 @@ export default function AddLeagueModal({ league, isOpen, onClose, onAdd, isAddin
     staleTime: 5 * 60 * 1000,
   });
 
-  const availableEventTypes = useMemo(() => eventTypesResponse || [], [eventTypesResponse]);
+  const availableEventTypes = eventTypesResponse || [];
 
   // Fetch existing league settings if in edit mode
   // IMPORTANT: Use string for query key to match LeagueDetailPage's useParams (which returns strings)
@@ -399,11 +392,16 @@ export default function AddLeagueModal({ league, isOpen, onClose, onAdd, isAddin
       );
     }
     return filtered;
-    // selectedTeamIds is read by the filter above, to keep a team that is
-    // already ticked visible while a search narrows the list. Without it here
-    // the list kept using the selection from before the tick, so a selected
-    // team dropped out the moment the query stopped matching its name.
   }, [teams, searchQuery, selectedTeamIds]);
+  const teamGroups = useMemo(() => partitionTeamsByRecency(teams, recentTeamIds), [teams, recentTeamIds]);
+  const filteredGroups = useMemo(
+    () => partitionTeamsByRecency(filteredTeams, recentTeamIds),
+    [filteredTeams, recentTeamIds]
+  );
+  const hasEarlierTeams = teamGroups.earlier.length > 0;
+  const earlierSelected = teamGroups.earlier.some(team => selectedTeamIds.has(team.idTeam));
+  const earlierForcedOpen = isOlderGroupForcedOpen(searchQuery, earlierSelected, selectAll);
+  const earlierOpen = showEarlierTeams || earlierForcedOpen;
 
   // Load existing monitored teams when in edit mode (not for motorsports)
   // Only load once when existingLeague first becomes available
@@ -416,8 +414,8 @@ export default function AddLeagueModal({ league, isOpen, onClose, onAdd, isAddin
       initializedTeamsRef.current = true;
 
       const monitoredExternalIds = existingLeague.monitoredTeams
-        .filter((mt: MonitoredTeamLink) => mt.monitored && mt.team)
-        .map((mt: MonitoredTeamLink) => mt.team!.externalId);
+        .filter((mt: any) => mt.monitored && mt.team)
+        .map((mt: any) => mt.team.externalId);
       setSelectedTeamIds(new Set(monitoredExternalIds));
       setSelectAll(monitoredExternalIds.length === teams.length);
     }
@@ -637,6 +635,7 @@ export default function AddLeagueModal({ league, isOpen, onClose, onAdd, isAddin
       initializedTeamsRef.current = false;
       initializedSettingsRef.current = false;
       initializedDataVersionRef.current = null;
+      setShowEarlierTeams(false);
     }
   }, [isOpen]);
 
@@ -662,6 +661,31 @@ export default function AddLeagueModal({ league, isOpen, onClose, onAdd, isAddin
     }
   };
 
+  const renderTeamButton = (team: Team) => {
+    const isSelected = selectedTeamIds.has(team.idTeam);
+    return (
+      <button
+        key={team.idTeam}
+        type="button"
+        onClick={() => handleTeamToggle(team.idTeam)}
+        className={`flex min-h-11 items-center gap-3 rounded-lg border p-3 text-left transition-all ${
+          isSelected ? 'border-red-600 bg-red-600/20' : 'border-gray-700 bg-black/30 hover:border-gray-600'
+        }`}
+      >
+        {team.strTeamBadge && <img src={team.strTeamBadge} alt="" className="h-10 w-10 flex-none object-contain" />}
+        <div className="min-w-0 flex-1">
+          <div className="font-medium text-white">{team.strTeam}</div>
+          {team.strTeamShort && <div className="text-xs text-gray-400">{team.strTeamShort}</div>}
+        </div>
+        <div className={`flex h-5 w-5 flex-none items-center justify-center rounded border-2 ${
+          isSelected ? 'border-red-600 bg-red-600' : 'border-gray-600'
+        }`}>
+          {isSelected && <CheckIcon className="h-4 w-4 text-white" />}
+        </div>
+      </button>
+    );
+  };
+
   const handlePartToggle = (part: string) => {
     setMonitoredParts(prev => {
       const newSet = new Set(prev);
@@ -676,6 +700,19 @@ export default function AddLeagueModal({ league, isOpen, onClose, onAdd, isAddin
       }
       return newSet;
     });
+  };
+
+  const handleSelectAllParts = () => {
+    if (!league?.strSport) return;
+    const availableParts = getPartOptions(league.strSport);
+
+    if (selectAllParts) {
+      setMonitoredParts(new Set());
+      setSelectAllParts(false);
+    } else {
+      setMonitoredParts(new Set(availableParts));
+      setSelectAllParts(true);
+    }
   };
 
   const handleSessionTypeToggle = (sessionType: string) => {
@@ -867,6 +904,7 @@ export default function AddLeagueModal({ league, isOpen, onClose, onAdd, isAddin
   const selectedCount = selectedTeamIds.size;
   const logoUrl = league?.strBadge || league?.strLogo;
   const availableParts = league ? getPartOptions(league.strSport) : [];
+  const selectedPartsCount = monitoredParts.size;
   const selectedSessionTypesCount = monitoredSessionTypes.size;
 
   // Per-type quality dropdowns name the profile the league default resolves
@@ -877,7 +915,7 @@ export default function AddLeagueModal({ league, isOpen, onClose, onAdd, isAddin
   const selectedEventTypesCount = monitoredEventTypes.size;
   // Show team selection for leagues with meaningful team data
   // Skip for: Motorsport (no home/away teams), Darts (individual players), Climbing (individual climbers), Gambling (individual poker players), Badminton/Table Tennis/Snooker (individual racket/cue players), individual Tennis (ATP, WTA), and UFC-style fighting leagues (use event types instead)
-  const showTeamSelection = league ? !isMotorsport(league.strSport) && !isGolf(league.strSport) && !isDarts(league.strSport) && !isClimbing(league.strSport) && !isGambling(league.strSport) && !isIndividualRacketOrCueSport(league.strSport) && !isIndividualTennis(league.strSport, league.strLeague) && !usesFightingEventTypes(league.strSport, league.strLeague) : false;
+  const showTeamSelection = league ? !isTeamlessSport(league.strSport, league.strLeague, league.strSportFormat) && !usesFightingEventTypes(league.strSport, league.strLeague) : false;
   // Only fighting sports use multi-part episodes
   const showPartsSelection = config?.enableMultiPartEpisodes && league && isFightingSport(league.strSport);
   // Show session type selection for motorsports
@@ -1025,42 +1063,37 @@ export default function AddLeagueModal({ league, isOpen, onClose, onAdd, isAddin
                           </div>
                         )}
 
-                        {/* Team Grid */}
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-96 overflow-y-auto">
-                          {filteredTeams.map(team => {
-                            const isSelected = selectedTeamIds.has(team.idTeam);
-                            return (
-                              <button
-                                key={team.idTeam}
-                                onClick={() => handleTeamToggle(team.idTeam)}
-                                className={`flex items-center gap-3 p-3 rounded-lg border transition-all text-left ${
-                                  isSelected
-                                    ? 'bg-red-600/20 border-red-600'
-                                    : 'bg-black/30 border-gray-700 hover:border-gray-600'
-                                }`}
-                              >
-                                {team.strTeamBadge && (
-                                  <img
-                                    src={team.strTeamBadge}
-                                    alt={team.strTeam}
-                                    className="w-10 h-10 object-contain"
-                                  />
-                                )}
-                                <div className="flex-1">
-                                  <div className="font-medium text-white">{team.strTeam}</div>
-                                  {team.strTeamShort && (
-                                    <div className="text-xs text-gray-400">{team.strTeamShort}</div>
-                                  )}
-                                </div>
-                                <div className={`w-5 h-5 rounded border-2 flex items-center justify-center transition-colors ${
-                                  isSelected ? 'bg-red-600 border-red-600' : 'border-gray-600'
-                                }`}>
-                                  {isSelected && <CheckIcon className="w-4 h-4 text-white" />}
-                                </div>
-                              </button>
-                            );
-                          })}
+                        {hasEarlierTeams && (
+                          <div className="mb-3">
+                            <div className="font-semibold text-white">Recent teams ({filteredGroups.recent.length})</div>
+                            <div className="text-xs text-gray-400">Teams in the three newest seasons with events.</div>
+                          </div>
+                        )}
+                        <div className="grid max-h-96 grid-cols-1 gap-3 overflow-y-auto md:grid-cols-2">
+                          {filteredGroups.recent.map(renderTeamButton)}
                         </div>
+                        {hasEarlierTeams && (
+                          <div className="mt-4">
+                            {earlierForcedOpen ? (
+                              <div className="font-semibold text-white">Older teams ({filteredGroups.earlier.length})</div>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => setShowEarlierTeams(!showEarlierTeams)}
+                                aria-expanded={earlierOpen}
+                                className={`${BUTTON_SECONDARY} w-full gap-2`}
+                              >
+                                <span>Older teams ({filteredGroups.earlier.length})</span>
+                                <ChevronDownIcon className={`h-4 w-4 transition-transform ${earlierOpen ? 'rotate-180' : ''}`} />
+                              </button>
+                            )}
+                            {earlierOpen && (
+                              <div className="mt-3 grid max-h-96 grid-cols-1 gap-3 overflow-y-auto md:grid-cols-2">
+                                {filteredGroups.earlier.map(renderTeamButton)}
+                              </div>
+                            )}
+                          </div>
+                        )}
 
                         {/* Special events: finals/playoffs bypass the team filter.
                             Placed below the team grid so the team selection reads
@@ -1139,18 +1172,30 @@ export default function AddLeagueModal({ league, isOpen, onClose, onAdd, isAddin
                               </select>
                             </div>
                           )}
-                          <label className="flex items-start gap-3 p-3 rounded-lg bg-gray-800 hover:bg-gray-750 cursor-pointer">
+                          <label className="flex items-center gap-3 p-3 rounded-lg bg-gray-800 hover:bg-gray-750 cursor-pointer">
                             <input
                               type="checkbox"
                               checked={keepAllEvents}
                               onChange={(e) => setKeepAllEvents(e.target.checked)}
                               className="w-5 h-5 bg-black border-2 border-gray-600 rounded text-red-600 focus:ring-red-600 focus:ring-offset-0 focus:ring-2"
                             />
-                            <div>
-                              <div className="text-sm font-medium text-white">Keep every game in the library</div>
-                              <div className="text-xs text-gray-400">
-                                Games without one of your teams are normally not stored at all. Keep them, unmonitored, so you can find a one-off game and monitor it yourself. Uses more disk.
-                              </div>
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-sm font-medium text-white">Show all events</span>
+                              <PortalTooltip
+                                className="w-72 p-2 text-left"
+                                content={
+                                  <>
+                                    <p className="text-gray-300 text-[11px]">
+                                      Only events for the teams and session types you follow are shown.
+                                    </p>
+                                    <p className="text-gray-400 text-[11px] mt-1">
+                                      Turn this on to show every event the league has. They arrive unmonitored, and the extra events use more disk.
+                                    </p>
+                                  </>
+                                }
+                              >
+                                <ExclamationTriangleIcon className="w-4 h-4 text-yellow-400 cursor-help" />
+                              </PortalTooltip>
                             </div>
                           </label>
                           {/* Turning the setting off stops new games being
@@ -1383,6 +1428,11 @@ export default function AddLeagueModal({ league, isOpen, onClose, onAdd, isAddin
                       <option value="SpecialsOnly">Special Events Only (finals / playoffs / preseason)</option>
                       <option value="None">None (manual monitoring only)</option>
                     </select>
+                    {monitorType === 'Future' && (
+                      <p className="text-xs text-gray-400 mt-2">
+                        Events added while upcoming stay monitored after they air. Unmonitor an event to stop future downloads for it.
+                      </p>
+                    )}
                     {monitorType === 'SpecialsOnly' && (
                       <p className="text-xs text-gray-400 mt-2">
                         Monitors only special events across all seasons, using the Special events
@@ -1588,7 +1638,7 @@ export default function AddLeagueModal({ league, isOpen, onClose, onAdd, isAddin
                         className="w-5 h-5 bg-black border-2 border-gray-600 rounded text-red-600 focus:ring-red-600 focus:ring-offset-0 focus:ring-2"
                       />
                       <div>
-                        <div className="text-sm font-medium text-white">Search on add/update</div>
+                        <div className="text-sm font-medium text-white">Search for missing events on add/update</div>
                         <div className="text-xs text-gray-400">Automatically search when league is added or settings change</div>
                       </div>
                     </label>
@@ -1605,6 +1655,9 @@ export default function AddLeagueModal({ league, isOpen, onClose, onAdd, isAddin
                         <div className="text-xs text-gray-400">Search for quality upgrades when league is added or settings change</div>
                       </div>
                     </label>
+                    <p className="text-xs text-gray-400">
+                      These options only start searches when you add or update this league. Other automatic searches, RSS feeds, and pushed releases can still upgrade monitored events. Turn off upgrades in the quality profile to stop automatic replacements.
+                    </p>
                   </div>
 
                   {/* Custom Search Query Template */}

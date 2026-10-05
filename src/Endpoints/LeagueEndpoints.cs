@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -9,6 +10,7 @@ using Sportarr.Api.Helpers;
 using Sportarr.Api.Models;
 using Sportarr.Api.Models.Requests;
 using Sportarr.Api.Services;
+using Sportarr.Api.Services.Interfaces;
 using System.Collections.Concurrent;
 using System.Text.Json;
 
@@ -27,6 +29,30 @@ public static class LeagueEndpoints
     // pressure is exactly what a restart already trims.
     private static readonly ConcurrentDictionary<int, DateTime> _refreshCooldowns = new();
     private static readonly TimeSpan _refreshCooldown = TimeSpan.FromMinutes(5);
+
+    // The Add League table's sortable, filterable columns, keyed by the
+    // field names the endpoint returns.
+    private static readonly Dictionary<string, Func<SportarrLeagueDto, string?>> LeagueCatalogColumns =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["strLeague"] = l => l.StrLeague,
+            ["strSport"] = l => l.StrSport,
+            ["strCountry"] = l => l.StrCountry,
+            ["intFormedYear"] = l => l.IntFormedYear,
+        };
+
+    internal static async Task<RefreshEventsRequest?> ReadRefreshEventsRequestAsync(HttpRequest request)
+    {
+        using var reader = new StreamReader(request.Body, leaveOpen: true);
+        var body = await reader.ReadToEndAsync(request.HttpContext.RequestAborted);
+        if (body.Length == 0)
+            return null;
+
+        return JsonSerializer.Deserialize<RefreshEventsRequest>(body, new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true
+        });
+    }
 
     public static IEndpointRouteBuilder MapLeagueEndpoints(this IEndpointRouteBuilder app)
     {
@@ -165,6 +191,7 @@ app.MapGet("/api/leagues/{id:int}", async (int id, SportarrDbContext db, FileNam
         league.Name,
         league.AlternateName,
         league.Sport,
+        league.SportFormat,
         league.Country,
         league.Description,
         league.Monitored,
@@ -419,8 +446,9 @@ app.MapGet("/api/leagues/{id:int}/seasons", async (int id, bool? showAll, Sporta
     return Results.Ok(new { totalEvents = visible.Count, seasons });
 });
 
-app.MapGet("/api/leagues/{id:int}/events", async (int id, int? page, int? pageSize, bool? showAll, string? season, SportarrDbContext db, ILogger<Program> logger) =>
+app.MapGet("/api/leagues/{id:int}/events", async (int id, int? page, int? pageSize, bool? showAll, string? season, SportarrDbContext db, ConfigService configService, ILogger<Program> logger) =>
 {
+    var config = await configService.GetConfigAsync();
     logger.LogInformation("[LEAGUES] Getting events for league ID: {LeagueId}", id);
 
     // Get league with monitored teams for filtering
@@ -475,7 +503,7 @@ app.MapGet("/api/leagues/{id:int}/events", async (int id, int? page, int? pageSi
         var pageItems = filteredEvents
             .Skip((currentPage - 1) * size)
             .Take(size)
-            .Select(EventResponse.FromEvent)
+            .Select(e => EventResponse.FromEvent(e, config.EnableMultiPartEpisodes, filesLoaded: true, leagueOverride: league))
             .ToList();
 
         logger.LogInformation("[LEAGUES] Returning page {Page} ({Count} of {Total}) for league: {LeagueName}",
@@ -492,7 +520,7 @@ app.MapGet("/api/leagues/{id:int}/events", async (int id, int? page, int? pageSi
     }
 
     // Convert to DTOs
-    var response = filteredEvents.Select(EventResponse.FromEvent).ToList();
+    var response = filteredEvents.Select(e => EventResponse.FromEvent(e, config.EnableMultiPartEpisodes, filesLoaded: true, leagueOverride: league)).ToList();
 
     logger.LogInformation("[LEAGUES] Found {Count} events for league: {LeagueName} (filtered from {Total})",
         response.Count, league.Name, events.Count);
@@ -688,6 +716,16 @@ app.MapGet("/api/leagues/external/{externalId}/teams", async (string externalId,
     return Results.Ok(teams);
 });
 
+app.MapGet("/api/leagues/external/{externalId}/team-selection", async (string externalId, SportarrApiClient sportsDbClient) =>
+{
+    var selection = await sportsDbClient.GetLeagueTeamSelectionAsync(externalId);
+    return Results.Ok(new
+    {
+        teams = selection?.Teams ?? new List<Team>(),
+        recentTeamIds = selection?._Meta?.RecentTeamIds ?? new List<string>()
+    });
+});
+
 // API: Get motorsport session types for a league (based on league name)
 // Used by the Add League modal to show which sessions can be monitored
 app.MapGet("/api/motorsport/session-types", (string leagueName) =>
@@ -737,13 +775,20 @@ app.MapGet("/api/leagues/{id:int}/teams", async (int id, SportarrDbContext db, S
 });
 
 // API: Update league (including monitor toggle)
-app.MapPut("/api/leagues/{id:int}", async (int id, JsonElement body, SportarrDbContext db, FileRenameService fileRenameService, ILogger<Program> logger) =>
+app.MapPut("/api/leagues/{id:int}", async (int id, JsonElement body, SportarrDbContext db, FileRenameService fileRenameService, TaskService taskService, ConfigService configService, ILogger<Program> logger) =>
 {
     var league = await db.Leagues.FindAsync(id);
     if (league == null)
     {
         return Results.NotFound(new { error = "League not found" });
     }
+
+    var keepAllEventsTurnedOn = false;
+    // A setting that widens what the library should hold has to go and get it.
+    // A scheduled sync walks current and future seasons only, so a season that
+    // is over is never revisited, and the recalculation below only re-reads
+    // events that are already stored.
+    var reachWidened = false;
 
     // Log the raw request body for debugging
     logger.LogInformation("[LEAGUES] Updating league: {Name} (ID: {Id}), Request body properties: {Properties}",
@@ -934,16 +979,18 @@ app.MapPut("/api/leagues/{id:int}", async (int id, JsonElement body, SportarrDbC
             applyToEvents = false;
         }
 
+        var config = await configService.GetConfigAsync();
+        var eventsToUpdate = await db.Events
+            .Include(e => e.Files)
+            .Where(e => e.LeagueId == id)
+            .ToListAsync();
+
         if (applyToEvents)
         {
             // Cascade to ALL events of all types (PPV, Fight Night, Contender Series, etc.)
             // BuildPartStatuses on each event then renders only the parts that exist for that
             // event type, so a Fight Night event with "Main Card,Prelims,Early Prelims" stored
             // shows just Main Card and Prelims (which is correct).
-            var eventsToUpdate = await db.Events
-                .Where(e => e.LeagueId == id)
-                .ToListAsync();
-
             if (eventsToUpdate.Count > 0)
             {
                 logger.LogInformation("[LEAGUES] Cascading monitored parts to {Count} events: {Parts}",
@@ -962,6 +1009,9 @@ app.MapPut("/api/leagues/{id:int}", async (int id, JsonElement body, SportarrDbC
         {
             logger.LogInformation("[LEAGUES] applyMonitoredPartsToEvents=false — league-level parts updated, existing events untouched");
         }
+
+        foreach (var evt in eventsToUpdate)
+            evt.HasFile = EventPartDetector.AreAllMonitoredPartsPresent(evt, config.EnableMultiPartEpisodes, league);
     }
 
     // Handle monitored session types for motorsport leagues (currently only F1)
@@ -1026,6 +1076,7 @@ app.MapPut("/api/leagues/{id:int}", async (int id, JsonElement body, SportarrDbC
             logger.LogInformation("[LEAGUES] MonitorFinals changing from {Old} to {New}", league.MonitorFinals, newMonitorFinals);
             league.MonitorFinals = newMonitorFinals;
             eventTypesChanged = true;
+            reachWidened |= newMonitorFinals;
         }
     }
     if (body.TryGetProperty("monitorPlayoffs", out var monitorPlayoffsProp) &&
@@ -1037,6 +1088,7 @@ app.MapPut("/api/leagues/{id:int}", async (int id, JsonElement body, SportarrDbC
             logger.LogInformation("[LEAGUES] MonitorPlayoffs changing from {Old} to {New}", league.MonitorPlayoffs, newMonitorPlayoffs);
             league.MonitorPlayoffs = newMonitorPlayoffs;
             eventTypesChanged = true;
+            reachWidened |= newMonitorPlayoffs;
         }
     }
     if (body.TryGetProperty("monitorPreseason", out var monitorPreseasonProp) &&
@@ -1048,6 +1100,7 @@ app.MapPut("/api/leagues/{id:int}", async (int id, JsonElement body, SportarrDbC
             logger.LogInformation("[LEAGUES] MonitorPreseason changing from {Old} to {New}", league.MonitorPreseason, newMonitorPreseason);
             league.MonitorPreseason = newMonitorPreseason;
             eventTypesChanged = true;
+            reachWidened |= newMonitorPreseason;
         }
     }
 
@@ -1063,13 +1116,13 @@ app.MapPut("/api/leagues/{id:int}", async (int id, JsonElement body, SportarrDbC
                 league.SpecialEventsMonitorType, newSpecialReach);
             league.SpecialEventsMonitorType = newSpecialReach;
             eventTypesChanged = true;
+            reachWidened = true;
         }
     }
 
-    // Keeping every event changes what the next sync writes, not what is
-    // monitored, so no event re-monitoring is triggered here. Turning it on
-    // takes effect on the next sync; turning it off lets the sync's
-    // out-of-filter cleanup remove the extra events again.
+    // Showing every event changes what the sync writes, not what is
+    // monitored, so no event re-monitoring is triggered here. Turning it off
+    // lets the sync's out-of-filter cleanup remove the extra events again.
     if (body.TryGetProperty("keepAllEvents", out var keepAllEventsProp) &&
         (keepAllEventsProp.ValueKind == JsonValueKind.True || keepAllEventsProp.ValueKind == JsonValueKind.False))
     {
@@ -1078,6 +1131,12 @@ app.MapPut("/api/leagues/{id:int}", async (int id, JsonElement body, SportarrDbC
         {
             logger.LogInformation("[LEAGUES] KeepAllEvents changing from {Old} to {New}", league.KeepAllEvents, newKeepAllEvents);
             league.KeepAllEvents = newKeepAllEvents;
+            // Turning it on must go and get the events the team filter kept
+            // out, the same way a changed team set does. Nothing else
+            // re-fetches them, so the setting would look broken until the
+            // next daily sync. Turning it off leaves them, and the edit
+            // dialog offers to remove them.
+            keepAllEventsTurnedOn = newKeepAllEvents;
         }
     }
 
@@ -1183,7 +1242,7 @@ app.MapPut("/api/leagues/{id:int}", async (int id, JsonElement body, SportarrDbC
             var cupStageSizesBySeason = allEvents
                 .GroupBy(e => e.Season ?? "")
                 .ToDictionary(g => g.Key, g => SpecialEventClassifier.ComputeCupStageSizes(g.Select(e => e.Round)));
-            var isTeamlessSport = LeagueSportRules.IsTeamlessSport(league.Sport, league.Name);
+            var isTeamlessSport = LeagueSportRules.IsTeamlessSport(league.Sport, league.Name, league.SportFormat);
 
             // A KeepAllEvents league stores games with none of the user's
             // teams in them. Every other league deletes those at sync, so
@@ -1230,7 +1289,7 @@ app.MapPut("/api/leagues/{id:int}", async (int id, JsonElement body, SportarrDbC
                 {
                     shouldMonitor = LeagueEventSyncService.ShouldMonitorEvent(
                         league, evt.EventDate, evt.Season, currentSeason, currentSeason,
-                        evt.Round, evt.Title, cupStageSizesBySeason[evt.Season ?? ""]);
+                        evt.Round, evt.Title, cupStageSizesBySeason[evt.Season ?? ""], evt.HasLaterSeasonFinal);
                 }
 
                 // Apply motorsport session type filter (only for F1 currently)
@@ -1334,17 +1393,36 @@ app.MapPut("/api/leagues/{id:int}", async (int id, JsonElement body, SportarrDbC
     league.LastUpdate = DateTime.UtcNow;
     await db.SaveChangesAsync();
 
+    if (keepAllEventsTurnedOn || reachWidened)
+    {
+        var refreshAlreadyQueued = await db.Tasks.AnyAsync(t =>
+            t.CommandName == "RefreshLeague" &&
+            t.Status == Sportarr.Api.Models.TaskStatus.Queued &&
+            t.Body != null && t.Body.Contains($"\"leagueId\":{league.Id},"));
+        if (refreshAlreadyQueued)
+        {
+            logger.LogInformation("[LEAGUES] {Name} needs the seasons walked again; a league refresh is already queued and will apply it", league.Name);
+        }
+        else
+        {
+            logger.LogInformation("[LEAGUES] Settings widened for {Name} - queueing deep sync to bring in the events the filter kept out, past seasons included", league.Name);
+            var showAllSyncBody = JsonSerializer.Serialize(new { leagueId = league.Id, scope = "full" });
+            await taskService.QueueTaskAsync($"Deep Sync {league.Name}", "RefreshLeague", priority: 0, body: showAllSyncBody);
+        }
+    }
+
     logger.LogInformation("[LEAGUES] Successfully updated league: {Name}", league.Name);
     return Results.Ok(LeagueResponse.FromLeague(league));
 });
 
 // API: Scan league folder for untracked video files
 // Creates PendingImport records for manual approval
-app.MapPost("/api/leagues/{id:int}/scan", async (int id, SportarrDbContext db, ImportMatchingService importMatchingService, ILogger<Program> logger) =>
+app.MapPost("/api/leagues/{id:int}/scan", async (int id, SportarrDbContext db, ImportMatchingService importMatchingService, ConfigService configService, ILogger<Program> logger) =>
 {
     var league = await db.Leagues.FindAsync(id);
     if (league == null)
         return Results.NotFound(new { error = "League not found" });
+    var recycleBin = (await configService.GetConfigAsync()).RecycleBin;
 
     // Root folders live in the RootFolders table — the single source of truth
     // the UI writes to and what every path (health check, league add, imports)
@@ -1424,7 +1502,8 @@ app.MapPost("/api/leagues/{id:int}/scan", async (int id, SportarrDbContext db, I
         {
             var files = LibraryPathFilter.FilterExcluded(
                 Directory.EnumerateFiles(leaguePath, "*.*", SearchOption.AllDirectories)
-                    .Where(f => videoExtensions.Contains(Path.GetExtension(f).ToLowerInvariant())));
+                    .Where(f => videoExtensions.Contains(Path.GetExtension(f).ToLowerInvariant())),
+                recycleBin);
 
             foreach (var filePath in files)
             {
@@ -1478,6 +1557,7 @@ app.MapPost("/api/leagues/{id:int}/scan", async (int id, SportarrDbContext db, I
                         Size = fileInfo.Length,
                         Quality = quality,
                         SuggestedEventId = suggestion?.EventId,
+                        SuggestedPart = suggestion?.Part,
                         SuggestionConfidence = suggestion?.Confidence ?? 0,
                         Detected = DateTime.UtcNow,
                         Status = PendingImportStatus.Pending
@@ -1658,66 +1738,34 @@ app.MapGet("/api/search/available-tokens", (ILogger<Program> logger) =>
 });
 
 // API: Get all leagues from Sportarr API (cached)
-// Optional q, sport and limit narrow the response server-side. Without them
-// this serves the whole catalog — 1,510 leagues and about 924 KB — which the
-// client then filters in the browser on every keystroke. All three are
-// additive: a caller that passes none gets exactly what it always did.
-app.MapGet("/api/leagues/all", async (HttpContext http, string? q, string? sport, int? limit, SportarrApiClient sportsDbClient, ILogger<Program> logger) =>
+// Search, sport, column filters, sort and limit are applied here rather than
+// in the browser (see CatalogQuery). Without them this serves the whole
+// catalog, about 1,500 leagues and 900 KB, which the Add League page used to
+// download and then re-filter on every keystroke.
+app.MapGet("/api/leagues/all", async (HttpContext http, SportarrApiClient sportsDbClient, ILogger<Program> logger) =>
 {
     var results = await sportsDbClient.GetAllLeaguesAsync();
 
     if (results == null || !results.Any())
     {
         logger.LogWarning("[LEAGUES] No leagues found in cache");
+        CatalogQuery.WriteCountHeaders(http.Response, 0, 0);
         return Results.Ok(new List<SportarrLeagueDto>());
     }
 
     // Convert to DTO to ensure correct field names for frontend (strBadge, strLogo, etc.)
-    IEnumerable<SportarrLeagueDto> matches = results.Select(SportarrLeagueDto.FromLeague);
+    var dtos = results.Select(SportarrLeagueDto.FromLeague);
+    var page = CatalogQuery.FromRequest(http.Request.Query).Apply(
+        dtos,
+        name: l => l.StrLeague,
+        sport: l => l.StrSport,
+        searchFields: l => [l.StrLeague, l.StrLeagueAlternate, l.StrSport, l.StrCountry],
+        columns: LeagueCatalogColumns);
 
-    if (!string.IsNullOrWhiteSpace(sport))
-    {
-        // Case-insensitive equality, not a substring test: the catalog ships
-        // the same sport with mixed casing, and a substring match would let
-        // "Football" pull in "Australian Football" too.
-        matches = matches.Where(l => string.Equals(l.StrSport, sport, StringComparison.OrdinalIgnoreCase));
-    }
-
-    if (!string.IsNullOrWhiteSpace(q))
-    {
-        var term = q.Trim();
-        matches = matches.Where(l =>
-            LeagueFieldContains(l.StrLeague, term) ||
-            LeagueFieldContains(l.StrLeagueAlternate, term) ||
-            LeagueFieldContains(l.StrSport, term) ||
-            LeagueFieldContains(l.StrCountry, term));
-    }
-
-    // Internal catalog records, e.g. "_Defunct Tennis Teams". The client
-    // hid these itself, which it cannot do once it stops receiving the full
-    // list.
-    matches = matches.Where(l =>
-    {
-        var name = (l.StrLeague ?? string.Empty).Trim();
-        return name.Length == 0 || (!name.StartsWith('_') && !name.EndsWith('_'));
-    });
-
-    var ordered = matches.OrderBy(l => l.StrLeague ?? string.Empty, StringComparer.OrdinalIgnoreCase).ToList();
-
-    // The caller needs the full match count to say "showing 200 of 1,510",
-    // which a truncated body can no longer tell it.
-    var matchedCount = ordered.Count;
-    http.Response.Headers["X-Total-Count"] = matchedCount.ToString();
-
-    var page = limit is > 0 ? ordered.Take(limit.Value).ToList() : ordered;
-
-    logger.LogDebug("[LEAGUES] Returning {Returned} of {Matched} leagues", page.Count, matchedCount);
-
-    return Results.Ok(page);
+    CatalogQuery.WriteCountHeaders(http.Response, page.Matched, page.Catalog);
+    logger.LogDebug("[LEAGUES] Returning {Returned} of {Matched} leagues", page.Rows.Count, page.Matched);
+    return Results.Ok(page.Rows);
 });
-
-static bool LeagueFieldContains(string? value, string term) =>
-    !string.IsNullOrEmpty(value) && value.Contains(term, StringComparison.OrdinalIgnoreCase);
 
 // The sport chips on the Add League page used to be derived from the full
 // catalog the client held. Now that it only receives a filtered page, the
@@ -1859,6 +1907,12 @@ app.MapPut("/api/leagues/{id:int}/teams", async (int id, UpdateMonitoredTeamsReq
             return Results.NotFound(new { error = "League not found" });
         }
 
+        // A legacy client can still submit country selections for event sports.
+        if (LeagueSportRules.IsTeamlessSport(league.Sport, league.Name, league.SportFormat))
+        {
+            return Results.Ok(new { message = "This league does not use team filtering", leagueId = league.Id });
+        }
+
         // Snapshot the current monitored set so we can tell whether this
         // request actually changed anything (the frontend re-sends the
         // full list on every save).
@@ -1993,7 +2047,8 @@ app.MapPut("/api/leagues/{id:int}/teams", async (int id, UpdateMonitoredTeamsReq
 });
 
 // API: Delete league
-app.MapDelete("/api/leagues/{id:int}", async (int id, bool deleteFiles, SportarrDbContext db, FileNamingService naming, ILogger<Program> logger) =>
+app.MapDelete("/api/leagues/{id:int}", async (int id, bool deleteFiles, SportarrDbContext db, FileNamingService naming,
+    [FromServices] IMetadataWriterService metadataWriterService, ILogger<Program> logger) =>
 {
     var league = await db.Leagues.FindAsync(id);
 
@@ -2029,6 +2084,7 @@ app.MapDelete("/api/leagues/{id:int}", async (int id, bool deleteFiles, Sportarr
                     File.Delete(eventFile.FilePath);
                     logger.LogDebug("[LEAGUES] Deleted file: {Path}", eventFile.FilePath);
                 }
+                await metadataWriterService.DeleteEventMetadataAsync(eventFile);
             }
             catch (Exception ex)
             {
@@ -2297,18 +2353,9 @@ app.MapPost("/api/leagues/{id:int}/refresh-events", async (
     try
     {
         // Parse request body for optional seasons filter + scope
-        List<string>? seasons = null;
-        string? scope = null;
-        if (context.Request.ContentLength > 0)
-        {
-            var requestBody = await new StreamReader(context.Request.Body).ReadToEndAsync();
-            var request = JsonSerializer.Deserialize<RefreshEventsRequest>(requestBody, new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true
-            });
-            seasons = request?.Seasons;
-            scope = request?.Scope;
-        }
+        var request = await ReadRefreshEventsRequestAsync(context.Request);
+        List<string>? seasons = request?.Seasons;
+        string? scope = request?.Scope;
 
         // Scope decides whether the refresh walks every historical
         // season or just the current/future window. "full" exists for
@@ -2758,7 +2805,7 @@ app.MapPost("/api/leagues/move/bulk", async (BulkMoveLeaguesRequest request, Lea
         // The sync stores every game while this is on, and stores every game
         // of a teamless sport or a league with no team selection. Answered
         // before the events are read, because these are the common cases.
-        if (league.KeepAllEvents || LeagueSportRules.IsTeamlessSport(league.Sport, league.Name))
+        if (league.KeepAllEvents || LeagueSportRules.IsTeamlessSport(league.Sport, league.Name, league.SportFormat))
         {
             return summary;
         }
@@ -2815,7 +2862,7 @@ app.MapPost("/api/leagues/move/bulk", async (BulkMoveLeaguesRequest request, Lea
         // Repeated from the caller, which skips reading the events at all in
         // these cases. The rule belongs with the classification, not with the
         // query that avoids it.
-        if (league.KeepAllEvents || LeagueSportRules.IsTeamlessSport(league.Sport, league.Name))
+        if (league.KeepAllEvents || LeagueSportRules.IsTeamlessSport(league.Sport, league.Name, league.SportFormat))
         {
             return;
         }
@@ -2942,7 +2989,11 @@ app.MapPost("/api/leagues/move/bulk", async (BulkMoveLeaguesRequest request, Lea
 
     internal static List<Event> SelectVisibleEvents(List<Event> events, League league, bool showAll)
     {
-        if (showAll)
+        // "Show all events" is one choice about the whole league. The sync
+        // stores every event for it, and the list shows every event it
+        // stored. Without this the setting filled the library with games the
+        // page then hid again.
+        if (showAll || league.KeepAllEvents)
         {
             return events;
         }
@@ -2962,7 +3013,7 @@ app.MapPost("/api/leagues/move/bulk", async (BulkMoveLeaguesRequest request, Lea
         // Teamless sports have no meaningful home/away structure, so they
         // never filter by team.
         var monitoredTeamIds = new HashSet<string>();
-        if (!LeagueSportRules.IsTeamlessSport(league.Sport, league.Name))
+        if (!LeagueSportRules.IsTeamlessSport(league.Sport, league.Name, league.SportFormat))
         {
             monitoredTeamIds = league.MonitoredTeams
                 .Where(lt => lt.Monitored && lt.Team != null)
@@ -3002,7 +3053,7 @@ app.MapPost("/api/leagues/move/bulk", async (BulkMoveLeaguesRequest request, Lea
                 e.HasFile ||
                 SpecialEventClassifier.BypassesTeamFilter(e.Round, e.Title,
                     league.MonitorFinals, league.MonitorPlayoffs, league.MonitorPreseason,
-                    cupStageSizesBySeason[e.Season ?? ""]))
+                    cupStageSizesBySeason[e.Season ?? ""], e.HasLaterSeasonFinal))
             .ToList();
     }
 }

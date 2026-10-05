@@ -36,10 +36,10 @@ export default function SettingsHeader({
       <div className="md:sticky md:top-0 z-30 bg-gradient-to-r from-gray-900 via-black to-gray-900 border-b border-red-900/30 backdrop-blur-sm mb-8">
         <div className="flex flex-col gap-4 p-4 sm:p-6 md:flex-row md:items-start md:justify-between">
           <div className="min-w-0">
-            <h1 className="text-3xl font-bold text-white mb-1">{title}</h1>
-            {subtitle && <p className="text-gray-400">{subtitle}</p>}
+            <h1 className="break-words text-2xl font-bold text-white md:text-3xl mb-1">{title}</h1>
+            {subtitle && <p className="break-words text-gray-400">{subtitle}</p>}
           </div>
-          <div className="flex flex-wrap items-center gap-3 md:justify-end">
+          <div className="flex min-w-0 flex-wrap items-center gap-3 md:justify-end">
             {children}
             {showSaveButton && onSave && (
               <div className="relative">
@@ -73,11 +73,12 @@ export default function SettingsHeader({
         </div>
       </div>
 
-      {/* Phone-only floating Save: appears above the tab bar only while there
-          is something to save, so the header itself never needs to pin. */}
+      {/* Floating Save for every size that uses the tab bar. It sits above
+          the bar and appears only while there is something to save, so the
+          header itself never needs to pin. */}
       {showSaveButton && onSave && hasUnsavedChanges && (
         <div
-          className="fixed inset-x-0 z-40 flex justify-end px-4 md:hidden pointer-events-none"
+          className="fixed inset-x-0 z-40 flex justify-end px-4 xl:hidden pointer-events-none"
           style={{ bottom: 'calc(4.5rem + env(safe-area-inset-bottom))' }}
         >
           <button

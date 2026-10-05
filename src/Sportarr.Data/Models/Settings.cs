@@ -59,6 +59,8 @@ public class AppSettings
     public int IptvPlaylistRefreshHours { get; set; } = 168;
     [System.ComponentModel.DataAnnotations.Schema.NotMapped]
     public int EpgRefreshHours { get; set; } = 48;
+    [System.ComponentModel.DataAnnotations.Schema.NotMapped]
+    public int EpgMaxDownloadSizeMb { get; set; } = Config.DefaultEpgMaxDownloadSizeMb;
 
     // RSS fetch tuning (Config.MaxRssReleasesPerIndexer/RssReleaseAgeLimit).
     // NotMapped, config.xml-backed.
@@ -257,6 +259,7 @@ public class MediaManagementSettings
     // CreateEventFolders: Creates folders like /UFC/Season 2024/UFC 310/ (requires CreateSeasonFolders)
     public bool CreateLeagueFolders { get; set; } = true;
     public bool CreateSeasonFolders { get; set; } = true;
+    public bool CreateEventTypeFolders { get; set; } = false;
     public bool CreateEventFolders { get; set; } = false; // Default false - events go in season folder
     public string LeagueFolderFormat { get; set; } = "{Series}";
     public string SeasonFolderFormat { get; set; } = "Season {Season}";

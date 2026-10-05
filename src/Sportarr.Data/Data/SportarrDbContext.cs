@@ -11,6 +11,34 @@ public class SportarrDbContext : DbContext
     {
     }
 
+    public override int SaveChanges(bool acceptAllChangesOnSuccess)
+    {
+        StampDownloadFailures();
+        return base.SaveChanges(acceptAllChangesOnSuccess);
+    }
+
+    public override Task<int> SaveChangesAsync(
+        bool acceptAllChangesOnSuccess, CancellationToken cancellationToken = default)
+    {
+        StampDownloadFailures();
+        return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+    }
+
+    private void StampDownloadFailures()
+    {
+        foreach (var entry in ChangeTracker.Entries<DownloadQueueItem>())
+        {
+            if (entry.Entity.Status != DownloadStatus.Failed)
+                continue;
+
+            var addedFailure = entry.State == EntityState.Added && entry.Entity.FailedAt == null;
+            var newFailure = entry.State == EntityState.Modified &&
+                entry.Property(item => item.Status).OriginalValue != DownloadStatus.Failed;
+            if (addedFailure || newFailure)
+                entry.Entity.FailedAt = DateTime.UtcNow;
+        }
+    }
+
     protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
     {
         // Applies to both DateTime and DateTime? properties - EF Core passes null through
@@ -502,22 +530,20 @@ public class SportarrDbContext : DbContext
                 Id = 1,
                 Name = "WEB-1080p (Alternative)",
                 IsDefault = true,
-                // TRaSH-managed: first-run enrichment and auto-sync may refresh its
-                // scores, but only until the user edits it (which sets IsCustomized).
+                // Recommendations can update this profile until the user edits it.
                 IsSynced = true,
                 UpgradesAllowed = true,
                 CutoffQuality = 15, // WEBDL-1080p
                 MinFormatScore = 0,
-                // TRaSH Guides recommended scores for essential custom formats
                 FormatItems = new List<ProfileFormatItem>
                 {
-                    new() { FormatId = 1, Score = -10000 }, // BR-DISK
-                    new() { FormatId = 2, Score = -10000 }, // LQ
-                    new() { FormatId = 3, Score = 5 },      // Repack/Proper
-                    new() { FormatId = 4, Score = -10000 }, // x265 (HD)
-                    new() { FormatId = 5, Score = -10000 }, // Upscaled
-                    new() { FormatId = 6, Score = 0 },      // Scene
-                    new() { FormatId = 7, Score = 10 }      // WEB-DL
+                    new() { FormatId = 1, Score = 0 },
+                    new() { FormatId = 2, Score = 0 },
+                    new() { FormatId = 3, Score = 0 },
+                    new() { FormatId = 4, Score = 0 },
+                    new() { FormatId = 5, Score = 0 },
+                    new() { FormatId = 6, Score = 0 },
+                    new() { FormatId = 7, Score = 0 }
                 },
                 Items = new List<QualityItem>
                 {
@@ -569,16 +595,15 @@ public class SportarrDbContext : DbContext
                 UpgradesAllowed = true,
                 CutoffQuality = 19, // WEBDL-2160p
                 MinFormatScore = 0,
-                // TRaSH Guides recommended scores for essential custom formats
                 FormatItems = new List<ProfileFormatItem>
                 {
-                    new() { FormatId = 1, Score = -10000 }, // BR-DISK
-                    new() { FormatId = 2, Score = -10000 }, // LQ
-                    new() { FormatId = 3, Score = 5 },      // Repack/Proper
-                    new() { FormatId = 4, Score = -10000 }, // x265 (HD)
-                    new() { FormatId = 5, Score = -10000 }, // Upscaled
-                    new() { FormatId = 6, Score = 0 },      // Scene
-                    new() { FormatId = 7, Score = 10 }      // WEB-DL
+                    new() { FormatId = 1, Score = 0 },
+                    new() { FormatId = 2, Score = 0 },
+                    new() { FormatId = 3, Score = 0 },
+                    new() { FormatId = 4, Score = 0 },
+                    new() { FormatId = 5, Score = 0 },
+                    new() { FormatId = 6, Score = 0 },
+                    new() { FormatId = 7, Score = 0 }
                 },
                 Items = new List<QualityItem>
                 {

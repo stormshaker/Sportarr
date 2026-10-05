@@ -12,6 +12,12 @@
 
 Sportarr does not unpack archives for torrents. Where an indexer delivers packed releases, run [Unpackerr](../integrations/unpackerr.md) against the same download folder and it extracts them before Sportarr imports.
 
+## SAB-compatible clients
+
+Give Sportarr its own category when SABnzbd, NZBdav, or Decypharr shares a queue with another application. Sportarr sends both common category parameter names so compatible clients keep the job in that category.
+
+Sportarr tracks each grab by the job ID returned by the client. That exact ID remains authoritative if a compatible client files the job under the wrong category. If the client replaces the ID, Sportarr can recover a single exact release-title match. It refuses partial or ambiguous title matches.
+
 ## Post-import behavior
 
 Each download client has a **Post-Import Mode** controlling how files reach your library:
@@ -26,9 +32,45 @@ If you manage seeding manually and never want Sportarr to move files out of your
 
 With **Remove Completed Downloads** enabled on a client, a move import finishes by removing the job from the client and deleting the job's leftover folder, including nfo, sample, and archive leftovers, so nothing of the release stays behind in the download directory. With the setting off, Sportarr leaves the client's jobs and folders completely alone.
 
+### A file for an event that already has one
+
+Sportarr keeps one file per event, or per part of an event. Automatic searches, RSS grabs, completed downloads, and library scans all use the assigned quality profile. Qualities nearer the top of the profile are preferred. A lower-ranked quality never replaces a higher-ranked file, while a higher-ranked quality can replace a lower-ranked file even when its custom format score is lower.
+
+Qualities placed in the same profile group have equal rank. The **Propers and Repacks** setting applies next. **Prefer and Upgrade** lets a newer revision win, **Do Not Upgrade Automatically** blocks an older revision without treating a newer revision as an upgrade, and **Do Not Prefer** ignores the revision. The custom format score follows. Use a group when those qualities should compete as equals instead of being ordered separately.
+
+A copy that is equal to the file an event already holds is not swapped in. It is listed in Activity with the reason, so you decide whether to import it, ignore it or remove it.
+
+A completed download that fails the rule stays in the queue with the reason and an **Import Anyway** button. A file that appears in a league folder and fails the rule is left where it is and listed in Activity with the reason. **Library Import** also lists it and imports whatever you select. The Remove button on such a row deletes the file too, to the recycle bin when one is set, unless you untick that in the remove dialog. Ignore keeps the file and only stops the scans listing it. When a copy that already sits beside the file it replaces takes over, the replaced file stays on disk untracked. A copy from anywhere else replaces it through the recycle bin.
+
+## Activity queue
+
+On phones and tablets, Queue shows compact rows. Open a row to see its release details and actions. The desktop sidebar shows the current download or import state and links to the queue item. If a job has made no recent progress, the sidebar says it needs attention instead of presenting it as active.
+
+Selecting rows shows bulk import and removal actions. Bulk import works only for eligible queue rows. Pending imports need per-item review, and **Import Anyway** needs individual confirmation. **Remove Selected** opens a confirmation. For downloads held by a client, the default **Remove from Download Client** method asks the client to delete the job and its files. Check that choice before confirming. Sportarr blocklists a removed pending import from a client even if that client cannot delete the job. Check the client if the download or files remain.
+
+When **Enable Auto Import** is off, completed downloads stay in Queue. Use **Import** on one row or select completed rows and choose **Import Selected**. Downloads that need a video choice or **Import Anyway** decision still need individual review.
+
+## Retry a completed import
+
+Activity shows **Retry Import** when a completed download has failed to import or a pack member is held for correction. Resolve the displayed reason, then retry the import. Retrying uses the completed download and does not submit another download job. Bulk import supports these retries. **Import Anyway** requires confirmation on each download and is not available in bulk.
+
+Pack members are checked against their own events and parts. A completed member does not allow Sportarr to remove a shared download while another member still needs it.
+
 ## Per-indexer client assignment
 
 Under an indexer's advanced settings you can pin a specific download client, so grabs from that indexer always go to that client regardless of priority order. Useful when one tracker should hit a dedicated seedbox client.
+
+## Completion notifications
+
+A client or integration can call `POST /api/download/completed` with its job ID
+to wake the download monitor after a job finishes. This avoids waiting for the
+next regular poll. See the [API contract and example](../APPLICATION_API.md#download-completion-notifications)
+for authentication, optional client IDs, and responses.
+
+The monitor still checks the client's status and follows your import settings.
+Repeated callbacks combine into one pending check, with at least five seconds
+between checks. Normal polling remains active. Unknown and already imported
+jobs return successfully without requesting another check.
 
 ## Background scanning and drive activity
 
@@ -38,7 +80,7 @@ The walk reads every directory of every root folder and checks every tracked fil
 
 Nothing you download waits for the scan:
 
-- Downloads import through the download client's own queue, polled every 30 seconds
+- Downloads import through the download client's own queue. The default poll interval is 30 seconds, configurable with a five-second minimum. Completion notifications can wake the monitor sooner
 - Blackhole grabs are tracked per queue item on that same poll
 - Files the watcher sees become pending imports immediately
 

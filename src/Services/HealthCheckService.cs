@@ -17,6 +17,9 @@ public class HealthCheckService
     private readonly DiskSpaceService _diskSpaceService;
     private readonly SportarrApiClient _sportarrApiClient;
     private readonly IHttpClientFactory _httpClientFactory;
+    private readonly FileNamingService _fileNamingService;
+    private readonly DatabaseHealthTracker _databaseHealth;
+    private readonly BackupService _backupService;
 
     public HealthCheckService(
         SportarrDbContext db,
@@ -25,7 +28,10 @@ public class HealthCheckService
         ConfigService configService,
         DiskSpaceService diskSpaceService,
         SportarrApiClient sportarrApiClient,
-        IHttpClientFactory httpClientFactory)
+        IHttpClientFactory httpClientFactory,
+        FileNamingService fileNamingService,
+        DatabaseHealthTracker databaseHealth,
+        BackupService backupService)
     {
         _db = db;
         _logger = logger;
@@ -34,6 +40,9 @@ public class HealthCheckService
         _diskSpaceService = diskSpaceService;
         _sportarrApiClient = sportarrApiClient;
         _httpClientFactory = httpClientFactory;
+        _fileNamingService = fileNamingService;
+        _databaseHealth = databaseHealth;
+        _backupService = backupService;
     }
 
     /// <summary>
@@ -43,15 +52,21 @@ public class HealthCheckService
     {
         var results = new List<HealthCheckResult>();
 
+        // First, and never from a query. A damaged database makes the checks
+        // below throw, and this one has to be reported when that happens.
+        results.AddRange(CheckDatabaseDamage());
+
         try
         {
             // Run all health checks
+            results.AddRange(await CheckBackupsAsync());
             results.AddRange(await CheckRootFoldersAsync());
             results.AddRange(await CheckDownloadClientsAsync());
             results.AddRange(await CheckIndexersAsync());
             results.AddRange(await CheckDiskSpaceAsync());
             results.AddRange(await CheckAuthenticationAsync());
             results.AddRange(await CheckOrphanedEventsAsync());
+            results.AddRange(await CheckRenamedLeagueFoldersAsync());
             results.AddRange(await CheckUpdateAvailableAsync());
             results.AddRange(await CheckDatabaseMigrationNeededAsync());
             results.AddRange(await CheckMetadataApiAsync());
@@ -72,21 +87,218 @@ public class HealthCheckService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error performing health checks");
-            results.Add(new HealthCheckResult
+
+            // A check that threw on a damaged database is the damage
+            // reporting itself. Record it so the probe endpoint agrees, and
+            // report it as damage rather than as a check that misbehaved.
+            _databaseHealth.RecordFailure(ex);
+
+            if (DatabaseHealthTracker.IsDamageSignal(ex))
             {
-                Type = HealthCheckType.CorruptedDatabase,
-                Level = HealthCheckLevel.Error,
-                Message = "Health check system error",
-                Details = ex.Message
-            });
+                if (!results.Any(r => r.Type == HealthCheckType.CorruptedDatabase))
+                    results.AddRange(CheckDatabaseDamage());
+            }
+            else
+            {
+                // Anything else is a check that misbehaved, not a damaged
+                // database. Saying "Database Corruption" here would send a
+                // user looking for a restore they do not need.
+                results.Add(new HealthCheckResult
+                {
+                    Type = HealthCheckType.HealthCheckFailed,
+                    Level = HealthCheckLevel.Warning,
+                    Message = "A health check could not complete",
+                    Details = ex.Message
+                });
+            }
         }
 
         return results.OrderByDescending(r => r.Level).ToList();
     }
 
     /// <summary>
+    /// A database that is damaged rather than merely busy. Read from the
+    /// tracker, never queried, so it still answers when no query can run.
+    /// </summary>
+    private List<HealthCheckResult> CheckDatabaseDamage()
+    {
+        var results = new List<HealthCheckResult>();
+        var (count, lastError, firstSeenUtc, _) = _databaseHealth.Snapshot();
+
+        if (count == 0)
+            return results;
+
+        var since = firstSeenUtc.HasValue
+            ? $" since {firstSeenUtc.Value:yyyy-MM-dd HH:mm} UTC"
+            : "";
+
+        results.Add(new HealthCheckResult
+        {
+            Type = HealthCheckType.CorruptedDatabase,
+            Level = HealthCheckLevel.Error,
+            Message = "The database is damaged and queries are failing",
+            Details = $"{count} command(s) have failed{since} because the stored data is damaged. " +
+                      "Parts of Sportarr keep working because only some tables are affected, so this can run for a long time unnoticed. " +
+                      "Restoring a backup from before the damage is the usual repair, and some index damage can be undone with REINDEX instead. " +
+                      "Take a copy of the database before you try either, and treat new backups as unreliable while this shows. " +
+                      (string.IsNullOrWhiteSpace(lastError) ? "" : $"Last error: {lastError}")
+        });
+
+        return results;
+    }
+
+    /// <summary>
+    /// Scheduled backups that have stopped. The scheduled run logs its
+    /// failure and moves on, so nothing else would say.
+    ///
+    /// Judged by the age of the newest backup rather than by watching for a
+    /// failure, so a full disk and a damaged database read the same way.
+    /// </summary>
+    private async Task<List<HealthCheckResult>> CheckBackupsAsync()
+    {
+        var results = new List<HealthCheckResult>();
+
+        try
+        {
+            var config = await _configService.GetConfigAsync();
+            if (config.BackupInterval <= 0)
+                return results;
+
+            List<BackupInfo> backups;
+            try
+            {
+                backups = await _backupService.GetBackupsAsync();
+            }
+            catch (Exception ex)
+            {
+                // An unreadable backup folder means no backups are being kept
+                // either, so it belongs on the same notice.
+                _logger.LogWarning(ex, "Could not read the backup folder");
+                results.Add(new HealthCheckResult
+                {
+                    Type = HealthCheckType.BackupsFailing,
+                    Level = HealthCheckLevel.Warning,
+                    Message = "The backup folder cannot be read",
+                    Details = $"Scheduled backups cannot run until this is fixed. {ex.Message}"
+                });
+                return results;
+            }
+
+            // A fresh install and one whose backups never worked look the
+            // same from here, so this waits for a first backup to exist.
+            // Backups that stop after working is what it reports.
+            if (backups.Count == 0)
+                return results;
+
+            // One missed run is a slow machine or a restart at the wrong
+            // moment. Two is a backup that is not happening.
+            var overdueAfter = TimeSpan.FromDays(config.BackupInterval * 2);
+            var newest = backups.Max(b => b.CreatedAt);
+
+            if (DateTime.UtcNow - newest <= overdueAfter)
+                return results;
+
+            results.Add(new HealthCheckResult
+            {
+                Type = HealthCheckType.BackupsFailing,
+                Level = HealthCheckLevel.Warning,
+                Message = "Scheduled backups have stopped",
+                Details = $"Backups are set to run every {config.BackupInterval} day(s) and the newest is from {newest:yyyy-MM-dd}. " +
+                          "Check the logs for [Housekeeping] Scheduled backup failed. A damaged database cannot be backed up, " +
+                          "so this and a database error together mean the backups you have are the last good ones."
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not determine backup state");
+        }
+
+        return results;
+    }
+
+    /// <summary>
     /// Check root folder configuration and accessibility
     /// </summary>
+    /// <summary>
+    /// A league whose files sit in a folder named after something else. A
+    /// competition can be renamed at the source (V8 Supercars became
+    /// Supercars in 2016) and the league folder is built from the name, so
+    /// files imported under the old name stay where they are. They keep
+    /// playing and stay linked to their events, so nothing is broken, but
+    /// new imports land in a new folder and the two drift apart.
+    ///
+    /// The check reads the files themselves rather than remembering a
+    /// rename, so it says the same thing whatever renamed the league, and it
+    /// clears itself once the files move. The user can also dismiss it.
+    /// </summary>
+    private async Task<List<HealthCheckResult>> CheckRenamedLeagueFoldersAsync()
+    {
+        var results = new List<HealthCheckResult>();
+        var settings = await _db.MediaManagementSettings.FirstOrDefaultAsync();
+        if (settings is null || !settings.CreateLeagueFolders) return results;
+
+        // Every league with files, monitored or not: the files sit in the old
+        // folder either way.
+        var leagues = await _db.Leagues.AsNoTracking()
+            .Select(l => new { l.Id, l.Name, l.Sport })
+            .ToListAsync();
+
+        foreach (var league in leagues)
+        {
+            var expected = _fileNamingService.BuildLeagueFolderName(settings,
+                new League { Id = league.Id, Name = league.Name, Sport = league.Sport });
+            if (string.IsNullOrWhiteSpace(expected)) continue;
+
+            var folders = await _db.EventFiles.AsNoTracking()
+                .Where(f => f.Event != null && f.Event.LeagueId == league.Id && f.Exists && f.FilePath != null)
+                .Select(f => f.FilePath!)
+                .Take(500)
+                .ToListAsync();
+
+            var stale = folders
+                .Select(LeagueFolderOf)
+                .Where(name => name != null && !string.Equals(name, expected, StringComparison.OrdinalIgnoreCase))
+                .GroupBy(name => name!, StringComparer.OrdinalIgnoreCase)
+                .OrderByDescending(g => g.Count())
+                .FirstOrDefault();
+
+            if (stale is null) continue;
+
+            results.Add(new HealthCheckResult
+            {
+                Type = HealthCheckType.LeagueFolderRenamed,
+                // Warning, not Notice, because only a warning carries the
+                // dismiss control in the header banner, and this notice is
+                // meant to be read once and closed.
+                Level = HealthCheckLevel.Warning,
+                Message = $"{league.Name} is now named differently from its folder '{stale.Key}'",
+                Details = $"{stale.Count()} {(stale.Count() == 1 ? "file" : "files")} for {league.Name} " +
+                          $"{(stale.Count() == 1 ? "is" : "are")} in a folder named '{stale.Key}'. " +
+                          $"They still play and stay linked to their events, and new files go to '{expected}'. " +
+                          "Use Rename Files on the league to move them, or dismiss this notice to keep them where they are."
+            });
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// The league folder a file sits in: the folder above its season folder
+    /// when there is one, otherwise the folder holding the file.
+    /// </summary>
+    private static string? LeagueFolderOf(string filePath)
+    {
+        var dir = Path.GetDirectoryName(filePath);
+        if (string.IsNullOrEmpty(dir)) return null;
+        var name = Path.GetFileName(dir);
+        if (name.StartsWith("Season ", StringComparison.OrdinalIgnoreCase))
+        {
+            var parent = Path.GetDirectoryName(dir);
+            name = string.IsNullOrEmpty(parent) ? name : Path.GetFileName(parent);
+        }
+        return string.IsNullOrWhiteSpace(name) ? null : name;
+    }
+
     private async Task<List<HealthCheckResult>> CheckRootFoldersAsync()
     {
         var results = new List<HealthCheckResult>();
@@ -117,46 +329,12 @@ public class HealthCheckService
                 continue;
             }
 
-            // Existing is not the same as usable. A read-only mount, or one
-            // owned by another user, passed this check as healthy while every
-            // import and every rename into it failed, and nothing warned
-            // anybody until files started going missing.
-            var writeError = DescribeWriteFailure(folder.Path);
-            if (writeError != null)
-            {
-                results.Add(new HealthCheckResult
-                {
-                    Type = HealthCheckType.RootFolderInaccessible,
-                    Level = HealthCheckLevel.Error,
-                    Message = $"Root folder is not writable: {folder.Path}",
-                    Details = $"Imports and renames into this folder will fail. {writeError}"
-                });
-            }
+            // RootFolderValidator proves writability when the folder is added.
+            // Recurring health checks stay read-only so they do not wake idle
+            // media disks and parity just to repeat that probe.
         }
 
         return results;
-    }
-
-    /// <summary>
-    /// Try to create and remove a file in a folder. Returns null when that
-    /// worked, or a description of why it did not.
-    /// </summary>
-    private static string? DescribeWriteFailure(string path)
-    {
-        var probe = Path.Combine(path, $".sportarr-write-test-{Guid.NewGuid():N}");
-        try
-        {
-            File.WriteAllBytes(probe, Array.Empty<byte>());
-            return null;
-        }
-        catch (Exception ex)
-        {
-            return ex.Message;
-        }
-        finally
-        {
-            try { if (File.Exists(probe)) File.Delete(probe); } catch { /* nothing left to do */ }
-        }
     }
 
     /// <summary>
