@@ -782,6 +782,24 @@ public class ReleaseMatchScorer
                 return 0; // Wrong game or not a game at all - reject immediately
             score += teamScore; // 0-40 points for matching teams
         }
+        else if (IsTitledMatchup(evt)
+            && !LeagueReleaseNamePolicy.HasStrongEventIdentity(releaseTitle, evt)
+            && !HasNonLatinLetters(releaseTitle)
+            && !NamesBothTeams(releaseTitle, evt, knownLeagues))
+        {
+            // A fixture outside the IsTeamSport list (NRL, AFL, the EFL tiers,
+            // Bundesliga and most other team leagues) gets no team scoring above,
+            // so a release for a different game in the same league on the same
+            // day scored exactly as the right one did, and could clear
+            // AutoGrabMatchScore. Validation does see that the teams are wrong,
+            // but when neither team is named it only rejects softly, and
+            // automatic search drops hard rejections alone. Requiring both teams,
+            // identified exactly as validation identifies them, keeps that
+            // release out of an automatic grab. A non-Latin title is left alone,
+            // as validation leaves it, because the team names may be written in
+            // a language we have no alias for.
+            return 0;
+        }
 
         // Date matching (for team sports with specific dates)
         // CRITICAL: a definite different date is a wrong-event signal, the same
@@ -2061,6 +2079,55 @@ public class ReleaseMatchScorer
         sportPrefix is "NBA" or "WNBA"
             ? BasketballLeagueIdentity.Detect(title) == sportPrefix
             : Regex.IsMatch(title, $@"(?<![A-Za-z0-9]){Regex.Escape(sportPrefix)}(?![A-Za-z0-9])", RegexOptions.IgnoreCase);
+
+    // Words that identify no club on their own: suffixes shared across a league
+    // ("Stoke City", "Norwich City"), and the women's-side marker.
+    private static readonly HashSet<string> GenericClubWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "city", "united", "town", "county", "rovers", "wanderers", "albion",
+        "athletic", "atletico", "real", "sporting", "club", "football", "fc", "afc",
+        "women", "womens",
+    };
+
+    /// <summary>
+    /// Whether a release names both teams of a fixture. Validation's own team
+    /// matcher decides first. A release can also drop a club's generic suffix
+    /// ("Stoke.vs.Norwich" for Stoke City v Norwich City), which that matcher
+    /// does not accept on its own, so a team also counts as named when every
+    /// distinctive word of its name appears as a whole word.
+    /// </summary>
+    private bool NamesBothTeams(string releaseTitle, Event evt, IReadOnlyCollection<League>? knownLeagues)
+    {
+        if (ReleaseMatchingService.CountNamedTeams(releaseTitle, evt, knownLeagues) >= 2)
+            return true;
+
+        var normalizedRelease = NormalizeTitle(releaseTitle);
+        return NamesDistinctiveWords(normalizedRelease, evt.HomeTeamName!)
+            && NamesDistinctiveWords(normalizedRelease, evt.AwayTeamName!);
+    }
+
+    private bool NamesDistinctiveWords(string normalizedRelease, string teamName)
+    {
+        var words = NormalizeTitle(teamName)
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Where(w => w.Length > 2 && !IsCommonWord(w) && !GenericClubWords.Contains(w))
+            .ToList();
+        return words.Count > 0 && words.All(w => GetWordBoundaryRegex(w).IsMatch(normalizedRelease));
+    }
+
+    // A fixture between two named teams, titled as one ("Stoke City vs Norwich
+    // City"). An event can carry team names without being a matchup, such as a
+    // grand prix keyed to a host country, and those are left alone.
+    private static readonly Regex MatchupTitlePattern = new(@"\s+vs\.?\s+", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private static bool IsTitledMatchup(Event evt) =>
+        !string.IsNullOrEmpty(evt.HomeTeamName) && !string.IsNullOrEmpty(evt.AwayTeamName)
+        && !string.IsNullOrEmpty(evt.Title) && MatchupTitlePattern.IsMatch(evt.Title);
+
+    // Same test validation uses: letters past Latin Extended-B (Cyrillic, Greek,
+    // CJK, Arabic). Accented Latin stays below it.
+    private static bool HasNonLatinLetters(string title) =>
+        title.Any(c => c > 'ɏ' && char.IsLetter(c));
 
     private bool IsTeamSport(string? sportPrefix)
     {
