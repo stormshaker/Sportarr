@@ -1964,7 +1964,7 @@ public class ReleaseMatchingService
     /// Returns 0, 1, or 2.
     /// Uses string fields (always available) with optional Team navigation properties for ShortName access.
     /// </summary>
-    private int ValidateTeamNames(
+    private static int ValidateTeamNames(
         string releaseTitle,
         string homeTeamName,
         string awayTeamName,
@@ -2012,6 +2012,34 @@ public class ReleaseMatchingService
         return (homeMatches ? 1 : 0) + (awayMatches ? 1 : 0);
     }
 
+    /// <summary>
+    /// How many of a fixture's two teams the release names (0, 1 or 2), judged
+    /// exactly as validation judges them: canonical names, short and alternate
+    /// names, user aliases, league and club suffix strips, and the variation
+    /// table. Lets the scorer reach the same verdict on team identity rather
+    /// than keeping a second, weaker copy of these rules.
+    /// </summary>
+    internal static int CountNamedTeams(
+        string releaseTitle,
+        Event evt,
+        IReadOnlyCollection<League>? knownLeagues = null)
+    {
+        if (string.IsNullOrEmpty(evt.HomeTeamName) || string.IsNullOrEmpty(evt.AwayTeamName))
+            return 0;
+
+        var (titleHomeName, titleAwayName) = ResolveTitleTeamAliases(evt);
+        return ValidateTeamNames(
+            releaseTitle,
+            evt.HomeTeamName,
+            evt.AwayTeamName,
+            evt.HomeTeam,
+            evt.AwayTeam,
+            evt.League,
+            knownLeagues,
+            titleHomeName,
+            titleAwayName);
+    }
+
     internal static bool AllowsRegularPluralTeamMatch(
         string releaseTitle,
         string normalizedRelease,
@@ -2051,7 +2079,7 @@ public class ReleaseMatchingService
             && LeagueSportRules.AreEquivalentSports(left.Sport, right.Sport);
     }
 
-    private (string? HomeAlias, string? AwayAlias) ResolveTitleTeamAliases(Event evt)
+    private static (string? HomeAlias, string? AwayAlias) ResolveTitleTeamAliases(Event evt)
     {
         if (string.IsNullOrWhiteSpace(evt.Title)) return (null, null);
 
@@ -2081,7 +2109,7 @@ public class ReleaseMatchingService
     /// Uses the team name string (always available) with optional Team nav property for ShortName.
     /// Checks against TeamNameVariationData for comprehensive abbreviation/nickname coverage.
     /// </summary>
-    private bool ContainsTeamName(
+    private static bool ContainsTeamName(
         string normalizedRelease,
         string teamName,
         Team? team = null)
