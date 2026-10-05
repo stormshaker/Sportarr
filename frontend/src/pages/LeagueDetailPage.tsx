@@ -1,5 +1,6 @@
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useQueries, useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { isAxiosError } from 'axios';
 import { ArrowLeftIcon, MagnifyingGlassIcon, ChevronDownIcon, ChevronRightIcon, UserIcon, ArrowPathIcon, UsersIcon, TrashIcon, FilmIcon, FolderOpenIcon, ExclamationTriangleIcon, SignalIcon, VideoCameraIcon, TagIcon, EllipsisHorizontalIcon } from '@heroicons/react/24/outline';
 import { CheckCircleIcon, CheckIcon } from '@heroicons/react/24/solid';
 import { useState, useEffect, useRef, useMemo } from 'react';
@@ -19,9 +20,9 @@ import RefreshScopeModal, { type RefreshScope } from '../components/RefreshScope
 import { useSearchQueueStatus, useDownloadQueue, useTasks } from '../api/hooks';
 import { useUISettings } from '../hooks/useUISettings';
 import { useCompactView } from '../hooks/useCompactView';
-import { formatDateInTimezone, formatEventDate } from '../utils/timezone';
+import { formatEventDate } from '../utils/timezone';
 import { getRefetchIntervalWithBackoff } from '../utils/queryBackoff';
-import { PAGE_PADDING, BUTTON_PRIMARY, BUTTON_SECONDARY, BUTTON_SUCCESS, BUTTON_INFO, BUTTON_DESTRUCTIVE } from '../utils/designTokens';
+import { PAGE_PADDING, BUTTON_PRIMARY, BUTTON_SECONDARY, BUTTON_SUCCESS } from '../utils/designTokens';
 
 // The three league header buttons share one grid cell each, so they stay the
 // same size. A phone gets a smaller label and tighter padding rather than a
@@ -400,9 +401,11 @@ export default function LeagueDetailPage() {
 
   // Adopt the league's saved order once it arrives. Keyed on the league id so
   // switching leagues picks up that league's choice.
+  const leagueId = league?.id;
+  const leagueSortOrder = league?.eventSortOrder;
   useEffect(() => {
-    if (league) setSortOldestFirst(league.eventSortOrder === 'asc');
-  }, [league?.id, league?.eventSortOrder]);
+    if (leagueId != null) setSortOldestFirst(leagueSortOrder === 'asc');
+  }, [leagueId, leagueSortOrder]);
 
   const toggleSortOrder = async () => {
     const next = !sortOldestFirst;
@@ -459,7 +462,7 @@ export default function LeagueDetailPage() {
   // event's season, scrolls its row into view, and pulses a highlight so
   // the click lands on the exact event instead of the top of the league.
   const [highlightedEventId, setHighlightedEventId] = useState<number | null>(null);
-  const seasonRows = seasonSummary?.seasons ?? [];
+  const seasonRows = useMemo(() => seasonSummary?.seasons ?? [], [seasonSummary]);
   const totalEventCount = seasonSummary?.totalEvents ?? 0;
 
   // Events arrive a season at a time, when that season is opened. useQueries
@@ -928,9 +931,9 @@ export default function LeagueDetailPage() {
       await queryClient.invalidateQueries({ queryKey: ['leagues'] });
       navigate('/leagues');
     },
-    onError: (error: any) => {
-      const errorMessage = error.response?.data?.error || 'Failed to delete league';
-      toast.error(errorMessage);
+    onError: (error: unknown) => {
+      const errorMessage = isAxiosError<{ error?: string }>(error) ? error.response?.data?.error : undefined;
+      toast.error(errorMessage || 'Failed to delete league');
     },
   });
 
@@ -966,8 +969,9 @@ export default function LeagueDetailPage() {
       await queryClient.refetchQueries({ queryKey: ['leagues'] });
       toast.success(data.message || 'File deleted');
     },
-    onError: (error: any) => {
-      toast.error(error.response?.data?.detail || 'Failed to delete file');
+    onError: (error: unknown) => {
+      const detail = isAxiosError<{ detail?: string }>(error) ? error.response?.data?.detail : undefined;
+      toast.error(detail || 'Failed to delete file');
     },
   });
 
@@ -991,7 +995,7 @@ export default function LeagueDetailPage() {
 
 
   const handleEditLeagueSettings = (
-    league: any,
+    league: unknown,
     monitoredTeamIds: string[],
     monitorType: string,
     qualityProfileId: number | null,
@@ -2629,8 +2633,6 @@ export default function LeagueDetailPage() {
                       <div className="divide-y divide-red-900/30">
                         {visibleSeasonEvents.map(event => {
                 const hasFile = event.hasFile;
-                const eventDate = new Date(event.eventDate);
-                const isPast = eventDate < new Date();
 
                 return (
                   <div
