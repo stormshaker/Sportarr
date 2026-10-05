@@ -96,8 +96,7 @@ internal sealed class RequestBudgetBaselineHarness : IAsyncDisposable
                             throw;
                         }
                     }
-                })
-                .ConfigureHttpClient(client => client.Timeout = TimeSpan.FromSeconds(20));
+                });
             provider = services.BuildServiceProvider(validateScopes: true);
             await using var scope = provider.CreateAsyncScope();
             var db = scope.ServiceProvider.GetRequiredService<SportarrDbContext>();
@@ -213,6 +212,14 @@ internal sealed class RequestBudgetBaselineHarness : IAsyncDisposable
 
     public sealed record QueryHealth(DateTime? LastSuccess, DateTime? LastQueryFailure,
         DateTime? QueryDisabledUntil, DateTime? LastConnectionError);
+
+    public async Task SetIndexerTimeoutAsync(int seconds)
+    {
+        var configuration = _services.GetRequiredService<ConfigService>();
+        var config = await configuration.GetConfigAsync();
+        config.IndexerHttpTimeoutSeconds = seconds;
+        await configuration.SaveConfigAsync(config);
+    }
 
     public HttpClient CompositionClient() => _services.GetRequiredService<IHttpClientFactory>().CreateClient("IndexerClient");
 
