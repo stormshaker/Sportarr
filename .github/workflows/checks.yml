@@ -85,17 +85,21 @@ jobs:
 
       - run: npm ci
 
-      # Lints the frontend files this PR changes, not the whole tree. Upstream
-      # does not lint in CI and carries a backlog of eslint errors in files we
-      # never touch; holding every PR to the whole tree would leave this red
-      # for reasons no PR here can own. Anything a PR touches must be clean.
-      - name: Lint changed files
+      # Lints the frontend files this fork changes from upstream dev, not the
+      # whole tree and not the PR's own diff. Upstream does not lint in CI and
+      # carries a backlog of eslint errors in files we never touch, so holding
+      # the whole tree would leave this red for reasons no PR here can own. A
+      # PR's own diff is the wrong measure too: a PR that moves this fork onto
+      # a newer upstream "changes" every file upstream changed, and inherits
+      # that backlog. What the fork must keep clean is what the fork itself
+      # changes, so the base is where this branch meets upstream dev.
+      - name: Lint the files this fork changes
         run: |
-          base="${{ github.event.pull_request.base.sha }}"
-          if [ -z "$base" ]; then npm run lint; exit $?; fi
-          files=$(git diff --name-only --diff-filter=ACMR "$base"...HEAD -- . \
+          git fetch --quiet --no-tags https://github.com/Sportarr/Sportarr.git dev
+          base=$(git merge-base FETCH_HEAD HEAD)
+          files=$(git diff --name-only --diff-filter=ACMR "$base" HEAD -- . \
             | sed -n 's#^frontend/##p' | grep -E '\.(ts|tsx|js|jsx)$' || true)
-          if [ -z "$files" ]; then echo "No frontend files changed."; exit 0; fi
+          if [ -z "$files" ]; then echo "This fork changes no frontend files."; exit 0; fi
           echo "$files"
           npx eslint $files
 
