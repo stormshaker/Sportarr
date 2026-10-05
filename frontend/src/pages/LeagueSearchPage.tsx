@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef } from 'react';
+import { useState, useMemo, useRef, useDeferredValue } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { MagnifyingGlassIcon, GlobeAltIcon, TrophyIcon, CheckCircleIcon } from '@heroicons/react/24/outline';
@@ -7,7 +7,7 @@ import CompactTableFrame from '../components/CompactTableFrame';
 import PageHeader from '../components/PageHeader';
 import SortableFilterableHeader from '../components/SortableFilterableHeader';
 import { useCompactView } from '../hooks/useCompactView';
-import { useTableSortFilter, applyTableSortFilter } from '../hooks/useTableSortFilter';
+import { useTableSortFilter } from '../hooks/useTableSortFilter';
 import AddLeagueModal from '../components/AddLeagueModal';
 import ConfirmationModal from '../components/ConfirmationModal';
 import { apiGet, apiPost, apiPut, apiDelete } from '../utils/api';
@@ -49,17 +49,15 @@ interface AddedLeagueInfo {
   externalId: string;
 }
 
-const isInternalLeagueName = (name: string) => {
-  const normalized = name.trim();
-  return normalized.startsWith('_') || normalized.endsWith('_');
-};
-
 // Set when the user reached this page from a manual import that had no league
 // to import against. Adding one sends them straight back to that file.
 interface ImportReturn {
   pendingImportId: number;
   fileName: string;
 }
+
+// Rows drawn per "Show more", the same pattern the Follow page uses.
+const LEAGUES_PAGE_SIZE = 60;
 
 export default function LeagueSearchPage() {
   const navigate = useNavigate();
@@ -80,17 +78,51 @@ export default function LeagueSearchPage() {
   const addModalDataRef = useRef<{ league: League; leagueId: number | null; editMode: boolean } | null>(null);
   const deleteModalDataRef = useRef<{ leagueId: number; leagueName: string; eventCount: number } | null>(null);
 
-  // Fetch all leagues from Sportarr API
-  const { data: allLeagues = [], isLoading } = useQuery({
-    queryKey: ['sportarr-leagues', 'all'],
+  // The server searches, filters, sorts and pages the catalog, so the page
+  // asks for the rows it is about to draw rather than all ~1,500 leagues.
+  // The column sort and filters belong to the compact table only.
+  const [visibleCount, setVisibleCount] = useState(LEAGUES_PAGE_SIZE);
+  const leaguesQuery = useMemo(() => {
+    const params = new URLSearchParams({ limit: String(visibleCount) });
+    if (searchQuery.trim()) params.set('q', searchQuery.trim());
+    if (selectedSport !== 'all') params.set('sport', selectedSport);
+    if (compactView) {
+      if (sortCol) {
+        params.set('sort', sortCol);
+        params.set('dir', sortDir);
+      }
+      Object.entries(colFilters).forEach(([col, value]) => {
+        if (value.trim()) params.set(`filter.${col}`, value.trim());
+      });
+    }
+    return params.toString();
+  }, [visibleCount, searchQuery, selectedSport, compactView, sortCol, sortDir, colFilters]);
+  // Typing paints at once while the request for the next page catches up.
+  const deferredLeaguesQuery = useDeferredValue(leaguesQuery);
+  const hasColumnFilter = compactView && Object.values(colFilters).some((value) => value.trim());
+
+  const { data: leaguesPage, isLoading } = useQuery({
+    queryKey: ['sportarr-leagues', 'all', deferredLeaguesQuery],
     queryFn: async () => {
-      const response = await apiGet('/api/leagues/all');
+      const response = await apiGet(`/api/leagues/all?${deferredLeaguesQuery}`);
       if (!response.ok) throw new Error('Failed to fetch leagues');
-      return response.json() as Promise<League[]>;
+      const leagues = await response.json() as League[];
+      // Counts before the server truncated, so the page can say how many more
+      // there are. They travel with the page they describe, so a cached page
+      // never shows another request's count.
+      const matched = Number.parseInt(response.headers.get('x-total-count') ?? '', 10);
+      const catalog = Number.parseInt(response.headers.get('x-catalog-count') ?? '', 10);
+      const matchedCount = Number.isFinite(matched) ? matched : leagues.length;
+      return { leagues, matched: matchedCount, catalog: Number.isFinite(catalog) ? catalog : matchedCount };
     },
+    // Keep the previous page on screen while the next one loads.
+    placeholderData: (previous) => previous,
     staleTime: 5 * 60 * 1000, // 5 minutes - data doesn't change often
     refetchOnWindowFocus: false, // Don't refetch on tab focus
   });
+  const filteredLeagues = useMemo(() => leaguesPage?.leagues ?? [], [leaguesPage]);
+  const matchedLeagueCount = leaguesPage?.matched ?? 0;
+  const catalogLeagueCount = leaguesPage?.catalog ?? 0;
 
   // Fetch user's added leagues to check which ones are already in library
   const { data: userLeagues = [] } = useQuery({
@@ -117,80 +149,25 @@ export default function LeagueSearchPage() {
     return map;
   }, [userLeagues]);
 
-  // Real-time filtering based on search query and selected sport, then sort alphabetically
-  const filteredLeagues = useMemo(() => {
-    let filtered = allLeagues;
+  // The chips come from their own endpoint rather than from the page of
+  // leagues on screen: that page moves with the filter, so deriving the chips
+  // from it would drop every sport except the selected one and leave no way
+  // back to "All Sports".
+  const { data: availableSports = [] } = useQuery({
+    queryKey: ['sportarr-league-sports'],
+    queryFn: async () => {
+      const response = await apiGet('/api/leagues/sports');
+      if (!response.ok) throw new Error('Failed to fetch sports');
+      return response.json() as Promise<string[]>;
+    },
+    staleTime: 30 * 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
 
-    // Filter by sport category. Compare case-insensitively because
-    // the same sport can ship from upstream with mixed casing
-    // ("Motorsport" vs "MotorSport") and we collapse those into a
-    // single chip above; an exact-equality filter here would only
-    // match one variant's leagues.
-    if (selectedSport !== 'all') {
-      const target = selectedSport.toLowerCase();
-      filtered = filtered.filter(league => (league.strSport ?? '').toLowerCase() === target);
-    }
-
-    // Filter by search query
-    if (searchQuery.trim()) {
-      const query = searchQuery.trim().toLowerCase();
-      filtered = filtered.filter(league =>
-        (league.strLeague ?? '').toLowerCase().includes(query) ||
-        league.strLeagueAlternate?.toLowerCase().includes(query) ||
-        (league.strSport ?? '').toLowerCase().includes(query) ||
-        league.strCountry?.toLowerCase().includes(query)
-      );
-    }
-
-    // Sort alphabetically; entries with _ prefix/suffix are internal records — hidden entirely
-    return filtered
-      .filter(l => !isInternalLeagueName(l.strLeague ?? ''))
-      .sort((a, b) => (a.strLeague ?? '').localeCompare(b.strLeague ?? ''));
-  }, [allLeagues, selectedSport, searchQuery]);
-
-  // Apply column filters and column sort on top of filteredLeagues (compact table only)
-  const tableLeagues = useMemo(
-    () => applyTableSortFilter(filteredLeagues, colFilters, sortCol, sortDir, (col, item) => {
-      switch (col) {
-        case 'strLeague': return String(item.strLeague || '');
-        case 'strSport': return String(item.strSport || '');
-        case 'strCountry': return String(item.strCountry || '');
-        case 'intFormedYear': return String(item.intFormedYear || '');
-        default: return '';
-      }
-    }),
-    [filteredLeagues, colFilters, sortCol, sortDir]
-  );
-
-  const sportFilters = useMemo(() => {
-    const filters = [{ id: 'all', name: 'All Sports', icon: '🌍' }];
-
-    // Case-insensitive dedup. The upstream metadata API has at least
-    // one inconsistency where a sport ships as both "Motorsport" and
-    // "MotorSport" depending on the league row, and a plain Set
-    // treats those as distinct - producing two visually identical
-    // chips on this page. Group by lowercase, keep the lexically
-    // first variant so the displayed casing is stable across
-    // refreshes regardless of which row was synced first.
-    const byLower = new Map<string, string>();
-    for (const l of allLeagues) {
-      if (isInternalLeagueName(l.strLeague ?? '')) continue;
-      const sport = l.strSport;
-      if (!sport) continue;
-      const key = sport.toLowerCase();
-      const existing = byLower.get(key);
-      if (existing == null || sport.localeCompare(existing) < 0) {
-        byLower.set(key, sport);
-      }
-    }
-    const uniqueSports = Array.from(byLower.values()).sort((a, b) => a.localeCompare(b));
-
-    uniqueSports.forEach(sport => {
-      filters.push({ id: sport, name: sport, icon: getSportIcon(sport) });
-    });
-
-    return filters;
-  }, [allLeagues]);
+  const sportFilters = useMemo(() => [
+    { id: 'all', name: 'All Sports', icon: '🌍' },
+    ...availableSports.map((sport) => ({ id: sport, name: sport, icon: getSportIcon(sport) })),
+  ], [availableSports]);
 
   const addLeagueMutation = useMutation({
     mutationFn: async ({
@@ -628,7 +605,7 @@ export default function LeagueSearchPage() {
     }
   };
 
-  const renderLeagueTable = (leagues: typeof tableLeagues) => (
+  const renderLeagueTable = (leagues: League[]) => (
     <CompactTableFrame>
         <thead>
           <tr className="text-xs text-gray-400 uppercase text-left border-b border-gray-700 bg-gray-950 sticky top-0">
@@ -757,7 +734,10 @@ export default function LeagueSearchPage() {
             <input
               type="text"
               value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+                setVisibleCount(LEAGUES_PAGE_SIZE);
+              }}
               placeholder="Filter leagues (e.g., UFC, Premier League, NBA)..."
               className="w-full pl-10 pr-4 py-2.5 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-red-600 focus:ring-1 focus:ring-red-600"
             />
@@ -765,7 +745,10 @@ export default function LeagueSearchPage() {
           {sportFilters.length > 1 && (
             <select
               value={selectedSport}
-              onChange={(e) => setSelectedSport(e.target.value)}
+              onChange={(e) => {
+                setSelectedSport(e.target.value);
+                setVisibleCount(LEAGUES_PAGE_SIZE);
+              }}
               className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2.5 text-sm text-white focus:border-red-600 focus:outline-none focus:ring-2 focus:ring-red-600/20 md:text-base"
               title="Filter by sport"
             >
@@ -778,7 +761,9 @@ export default function LeagueSearchPage() {
           )}
         </div>
         <p className="mb-4 text-sm text-gray-500 md:mb-6">
-          Showing {isLoading ? '...' : filteredLeagues.length} of {allLeagues.length} leagues
+          {isLoading
+            ? 'Loading leagues...'
+            : `Showing ${filteredLeagues.length.toLocaleString()} of ${matchedLeagueCount.toLocaleString()} ${matchedLeagueCount === 1 ? 'league' : 'leagues'}${matchedLeagueCount !== catalogLeagueCount ? ` (${catalogLeagueCount.toLocaleString()} total)` : ''}`}
           {searchQuery && ` matching "${searchQuery}"`}
           {selectedSport !== 'all' && ` in ${selectedSport}`}
         </p>
@@ -797,17 +782,17 @@ export default function LeagueSearchPage() {
         )}
 
         {/* Search Results */}
-        {!isLoading && filteredLeagues.length > 0 && (
+        {!isLoading && (filteredLeagues.length > 0 || hasColumnFilter) && (
           <div>
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-xl font-bold text-white">
                 {selectedSport === 'all' ? 'All Leagues' : `${selectedSport} Leagues`}
-                {' '}({filteredLeagues.length})
+                {' '}({matchedLeagueCount.toLocaleString()})
               </h2>
             </div>
 
             {compactView ? (
-              renderLeagueTable(tableLeagues)
+              renderLeagueTable(filteredLeagues)
             ) : (
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
                 {filteredLeagues.map(league => {
@@ -928,11 +913,23 @@ export default function LeagueSearchPage() {
                 })}
               </div>
             )}
+
+            {matchedLeagueCount > filteredLeagues.length && (
+              <div className="mt-6 flex justify-center">
+                <button
+                  type="button"
+                  onClick={() => setVisibleCount((count) => count + LEAGUES_PAGE_SIZE)}
+                  className={`${BUTTON_SECONDARY} min-h-11`}
+                >
+                  Show more ({(matchedLeagueCount - filteredLeagues.length).toLocaleString()} remaining)
+                </button>
+              </div>
+            )}
           </div>
         )}
 
         {/* Empty State */}
-        {!isLoading && filteredLeagues.length === 0 && (
+        {!isLoading && filteredLeagues.length === 0 && !hasColumnFilter && (
           <div className="text-center py-16">
             <TrophyIcon className="w-16 h-16 text-gray-600 mx-auto mb-4" />
             <h3 className="text-xl font-semibold text-gray-400 mb-2">

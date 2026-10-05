@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   ArrowPathIcon,
@@ -22,7 +22,7 @@ import PageShell from '../components/PageShell';
 import SortableFilterableHeader from '../components/SortableFilterableHeader';
 import { useColumnVisibility } from '../hooks/useColumnVisibility';
 import { useCompactView } from '../hooks/useCompactView';
-import { applyTableSortFilter, useTableSortFilter } from '../hooks/useTableSortFilter';
+import { useTableSortFilter } from '../hooks/useTableSortFilter';
 import { BUTTON_SECONDARY } from '../utils/designTokens';
 import { getSportIcon } from '../utils/sportIcons';
 import type { DiscoveredLeague, FollowedTeam, QualityProfile, Team } from '../types';
@@ -58,6 +58,13 @@ const BADGE_RED = 'whitespace-nowrap rounded bg-red-900/30 px-1.5 py-0.5 text-xs
 const BADGE_GREEN = 'whitespace-nowrap rounded bg-green-900/30 px-1.5 py-0.5 text-xs text-green-400';
 const SCROLLABLE_LIST = 'max-h-60 overflow-y-auto';
 const TEAMS_PAGE_SIZE = 60;
+
+// Compact table column -> the field the server sorts and filters it by.
+const TEAM_CATALOG_FIELDS: Record<string, string> = {
+  name: 'strTeam',
+  sport: 'strSport',
+  country: 'strCountry',
+};
 
 type TeamsColumnKey = 'badge' | 'name' | 'sport' | 'country' | 'status' | 'actions';
 
@@ -129,12 +136,40 @@ export default function TeamsPage() {
 
   const [isRefreshing, setIsRefreshing] = useState(false);
 
-  const { data: allTeams = [], isLoading: isLoadingTeams } = useQuery({
-    queryKey: ['all-teams'],
-    queryFn: async () => {
-      const response = await apiClient.get<TeamApiResponse[]>('/teams/all');
+  // The server searches, filters, sorts and pages the catalog, so the page
+  // asks for the rows it is about to draw rather than all ~17,000 teams.
+  // The column sort and filters belong to the compact table only, as they
+  // always have.
+  const teamsQuery = useMemo(() => {
+    const params = new URLSearchParams({ limit: String(visibleCount) });
+    if (searchQuery.trim()) params.set('q', searchQuery.trim());
+    if (selectedSport !== 'all') params.set('sport', selectedSport);
+    if (compactView) {
+      const sortField = TEAM_CATALOG_FIELDS[sortCol];
+      if (sortField) {
+        params.set('sort', sortField);
+        params.set('dir', sortDir);
+      }
+      Object.entries(colFilters).forEach(([col, value]) => {
+        const field = TEAM_CATALOG_FIELDS[col];
+        if (field && value.trim()) params.set(`filter.${field}`, value.trim());
+      });
+    }
+    return params.toString();
+  }, [visibleCount, searchQuery, selectedSport, compactView, sortCol, sortDir, colFilters]);
+  // Typing paints at once while the request for the next page catches up.
+  const deferredTeamsQuery = useDeferredValue(teamsQuery);
 
-      return (Array.isArray(response.data) ? response.data : []).map((team): Team => ({
+  const { data: teamsPage, isLoading: isLoadingTeams } = useQuery({
+    queryKey: ['all-teams', deferredTeamsQuery],
+    queryFn: async () => {
+      const response = await apiClient.get<TeamApiResponse[]>(`/teams/all?${deferredTeamsQuery}`);
+      const rows = Array.isArray(response.data) ? response.data : [];
+      const header = (name: string) => Number.parseInt(String(response.headers?.[name] ?? ''), 10);
+      const matched = header('x-total-count');
+      const catalog = header('x-catalog-count');
+
+      const teams = rows.map((team): Team => ({
         id: team.Id ?? team.id ?? 0,
         externalId: team.idTeam,
         name: team.strTeam ?? '',
@@ -146,16 +181,23 @@ export default function TeamsPage() {
         formedYear: team.intFormedYear ? Number.parseInt(team.intFormedYear, 10) : undefined,
         added: team.Added ?? team.added ?? new Date().toISOString(),
       }));
+      const matchedCount = Number.isFinite(matched) ? matched : teams.length;
+      return { teams, matched: matchedCount, catalog: Number.isFinite(catalog) ? catalog : matchedCount };
     },
     staleTime: 30 * 60 * 1000, // 30 min - backend caches for hours, no need for frequent refetches
     refetchOnWindowFocus: false,
+    // Keep the previous page on screen while the next one loads, so the list
+    // does not flash empty on every keystroke or "Show more".
+    placeholderData: (previous) => previous,
   });
 
   const handleRefreshTeams = async () => {
     setIsRefreshing(true);
     try {
       // Bust the backend cache first, then refetch via React Query
-      await apiClient.get('/teams/all?refresh=true');
+      // limit=1: this request only rebuilds the server's cache, so there
+      // is no reason to download the catalog with it.
+      await apiClient.get('/teams/all?refresh=true&limit=1');
       await queryClient.refetchQueries({ queryKey: ['all-teams'] });
       toast.success('Teams refreshed from API');
     } catch {
@@ -200,53 +242,12 @@ export default function TeamsPage() {
     return ids;
   }, [followedTeams]);
 
-  const filteredTeams = useMemo(() => {
-    if (!Array.isArray(allTeams)) return [];
-    let filtered = allTeams;
-
-    if (selectedSport !== 'all') {
-      // Exact match, not substring: with more sport filters added, a
-      // substring check would let "Football" match "Australian Football"
-      // teams too (same trap fixed backend-side in the bulk team fetch).
-      filtered = filtered.filter((team) =>
-        team.sport?.toLowerCase() === selectedSport.toLowerCase()
-      );
-    }
-
-    if (searchQuery.trim()) {
-      const query = searchQuery.toLowerCase();
-      filtered = filtered.filter((team) =>
-        team.name?.toLowerCase().includes(query) ||
-        team.shortName?.toLowerCase().includes(query) ||
-        team.alternateName?.toLowerCase().includes(query) ||
-        team.country?.toLowerCase().includes(query)
-      );
-    }
-
-    return filtered
-      .filter((team) => {
-        const name = team.name ?? '';
-        return !name.startsWith('_') && !name.endsWith('_');
-      })
-      .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
-  }, [allTeams, searchQuery, selectedSport]);
-
-  const tableData = useMemo(() => compactView ? applyTableSortFilter(
-    filteredTeams,
-    colFilters,
-    sortCol,
-    sortDir,
-    (col, team) => {
-      switch (col) {
-        case 'name': return String(team.name || '');
-        case 'sport': return String(team.sport || '');
-        case 'country': return String(team.country || '');
-        default: return '';
-      }
-    }
-  ) : [], [compactView, filteredTeams, colFilters, sortCol, sortDir]);
-  const matchingTeamCount = compactView ? tableData.length : filteredTeams.length;
-  const shownTeamCount = Math.min(visibleCount, matchingTeamCount);
+  // What arrives is already searched, filtered, sorted and paged.
+  const filteredTeams = useMemo(() => teamsPage?.teams ?? [], [teamsPage]);
+  const tableData = compactView ? filteredTeams : [];
+  const matchingTeamCount = teamsPage?.matched ?? 0;
+  const catalogTeamCount = teamsPage?.catalog ?? 0;
+  const shownTeamCount = Math.min(filteredTeams.length, matchingTeamCount);
 
   const followTeamMutation = useMutation({
     mutationFn: async (team: Team) => apiClient.post<FollowedTeam>('/followed-teams', {
@@ -677,7 +678,7 @@ export default function TeamsPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-700">
-              {tableData.slice(0, visibleCount).map((team) => {
+              {tableData.map((team) => {
                 const isFollowed = team.externalId ? followedTeamIds.has(team.externalId) : false;
                 const followedTeam = team.externalId ? getFollowedTeam(team.externalId) : null;
                 const isExpanded = expandedTeamId === team.externalId;
@@ -794,7 +795,7 @@ export default function TeamsPage() {
             </tbody>
           </CompactTableFrame>
         )}
-        {renderShowMore(tableData.length)}
+        {renderShowMore(matchingTeamCount)}
       </>
     );
   };
@@ -900,7 +901,7 @@ export default function TeamsPage() {
         <p className="mb-6 text-sm text-gray-500">
           {isLoadingTeams
             ? 'Loading teams...'
-            : `Showing ${shownTeamCount.toLocaleString()} of ${matchingTeamCount.toLocaleString()} ${matchingTeamCount === 1 ? 'team' : 'teams'}${matchingTeamCount !== allTeams.length ? ` (${allTeams.length.toLocaleString()} total)` : ''}`}
+            : `Showing ${shownTeamCount.toLocaleString()} of ${matchingTeamCount.toLocaleString()} ${matchingTeamCount === 1 ? 'team' : 'teams'}${matchingTeamCount !== catalogTeamCount ? ` (${catalogTeamCount.toLocaleString()} total)` : ''}`}
           {searchQuery && ` matching "${searchQuery}"`}
           {selectedSport !== 'all' && ` in ${SPORT_FILTERS.find((sport) => sport.id === selectedSport)?.name}`}
         </p>
@@ -922,7 +923,7 @@ export default function TeamsPage() {
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-xl font-semibold text-white">
                 {selectedSport === 'all' ? 'All Teams' : `${SPORT_FILTERS.find((sport) => sport.id === selectedSport)?.name} Teams`}
-                {filteredTeams.length > 0 && ` (${filteredTeams.length})`}
+                {matchingTeamCount > 0 && ` (${matchingTeamCount.toLocaleString()})`}
               </h2>
             </div>
 
@@ -930,7 +931,7 @@ export default function TeamsPage() {
               renderCompactTable()
             ) : filteredTeams.length > 0 ? (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {filteredTeams.slice(0, visibleCount).map((team) => {
+                {filteredTeams.map((team) => {
                   const isFollowed = team.externalId ? followedTeamIds.has(team.externalId) : false;
                   const isExpanded = expandedTeamId === team.externalId;
                   const followedTeam = team.externalId ? getFollowedTeam(team.externalId) : null;
@@ -1048,7 +1049,7 @@ export default function TeamsPage() {
                 </p>
               </div>
             )}
-            {!compactView && renderShowMore(filteredTeams.length)}
+            {!compactView && renderShowMore(matchingTeamCount)}
           </div>
         )}
 
