@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Sportarr.Api.Data;
 using Sportarr.Api.Helpers;
@@ -372,7 +373,7 @@ app.MapDelete("/api/events/{eventId:int}/files/{fileId:int}", async (
     SportarrDbContext db,
     ILogger<Program> logger,
     ConfigService configService,
-    AutomaticSearchService searchService,
+    IServiceScopeFactory scopeFactory,
     NotificationService notificationService,
     IMetadataWriterService metadataWriterService) =>
 {
@@ -509,12 +510,18 @@ app.MapDelete("/api/events/{eventId:int}/files/{fileId:int}", async (
             // Use event's profile first, then league's, then let AutomaticSearchService handle fallback
             var qualityProfileId = evt.QualityProfileId ?? evt.League?.QualityProfileId;
             var partName = file.PartName;
+            // The search outlives this request, so it must not use the request's
+            // services: the request-scoped SportarrDbContext is disposed as soon as
+            // the response is sent, and the search then fails at once with
+            // ObjectDisposedException. Give the background work its own scope.
             _ = Task.Run(async () =>
             {
+                using var scope = scopeFactory.CreateScope();
+                var scopedSearch = scope.ServiceProvider.GetRequiredService<AutomaticSearchService>();
                 try
                 {
                     logger.LogInformation("[FILES] Searching for replacement for event {EventId}, part: {Part}", eventId, partName ?? "all");
-                    await searchService.SearchAndDownloadEventAsync(eventId, qualityProfileId, partName, isManualSearch: true);
+                    await scopedSearch.SearchAndDownloadEventAsync(eventId, qualityProfileId, partName, isManualSearch: true);
                 }
                 catch (Exception ex)
                 {
@@ -577,7 +584,7 @@ app.MapDelete("/api/events/{id:int}/files", async (
     SportarrDbContext db,
     ILogger<Program> logger,
     ConfigService configService,
-    AutomaticSearchService searchService,
+    IServiceScopeFactory scopeFactory,
     NotificationService notificationService,
     IMetadataWriterService metadataWriterService) =>
 {
@@ -736,12 +743,15 @@ app.MapDelete("/api/events/{id:int}/files", async (
         {
             // Use event's profile first, then league's, then let AutomaticSearchService handle fallback
             var qualityProfileId = evt.QualityProfileId ?? evt.League?.QualityProfileId;
+            // Its own scope, for the same reason as the single-file delete above.
             _ = Task.Run(async () =>
             {
+                using var scope = scopeFactory.CreateScope();
+                var scopedSearch = scope.ServiceProvider.GetRequiredService<AutomaticSearchService>();
                 try
                 {
                     logger.LogInformation("[FILES] Searching for replacement for event {EventId}", id);
-                    await searchService.SearchAndDownloadEventAsync(id, qualityProfileId, null, isManualSearch: true);
+                    await scopedSearch.SearchAndDownloadEventAsync(id, qualityProfileId, null, isManualSearch: true);
                 }
                 catch (Exception ex)
                 {
