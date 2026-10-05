@@ -25,17 +25,17 @@ const teams = Array.from({ length: 90 }, (_, index) => ({
 
 // Stands in for /api/teams/all, which searches, filters, sorts and pages the
 // catalog on the server. Only what these tests exercise is modelled.
-function serveTeams(path: string) {
+function serveTeams(path: string, catalog = teams) {
   const url = new URL(path, 'http://sportarr.test');
   if (url.pathname !== '/teams/all') return null;
   const q = (url.searchParams.get('q') ?? '').toLowerCase();
   const nameFilter = (url.searchParams.get('filter.strTeam') ?? '').toLowerCase();
-  const matched = teams.filter((team) =>
+  const matched = catalog.filter((team) =>
     team.strTeam.toLowerCase().includes(q) && team.strTeam.toLowerCase().includes(nameFilter));
   const limit = Number(url.searchParams.get('limit') ?? matched.length);
   return {
     data: matched.slice(0, limit),
-    headers: { 'x-total-count': String(matched.length), 'x-catalog-count': String(teams.length) },
+    headers: { 'x-total-count': String(matched.length), 'x-catalog-count': String(catalog.length) },
   };
 }
 
@@ -60,7 +60,10 @@ async function renderTeamsPage() {
 describe('teams page render limit', () => {
   it('preselects new leagues but leaves existing library leagues for an explicit choice', async () => {
     transport.get.mockImplementation(async (path: string) => {
-      const page = serveTeams(path);
+      // One team is all this test follows. Serving the whole first page drew
+      // 60 badge cards before the test began, which on a slow runner took it
+      // past the default timeout without exercising anything it checks.
+      const page = serveTeams(path, teams.slice(0, 1));
       if (page) return page;
       if (path === '/followed-teams') return { data: [{ id: 1, externalId: '1000', name: 'Team 000', sport: 'Soccer' }] };
       if (path === '/qualityprofile') return { data: [{ id: 1, name: 'Any' }] };
