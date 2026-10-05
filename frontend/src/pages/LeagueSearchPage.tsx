@@ -49,6 +49,14 @@ interface AddedLeagueInfo {
   externalId: string;
 }
 
+// The fields this page reads from a league already in the library.
+interface LibraryLeague {
+  id: number;
+  externalId?: string;
+  logoUrl?: string;
+  eventCount?: number;
+}
+
 // Set when the user reached this page from a manual import that had no league
 // to import against. Adding one sends them straight back to that file.
 interface ImportReturn {
@@ -66,7 +74,6 @@ export default function LeagueSearchPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedSport, setSelectedSport] = useState('all');
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [editMode, setEditMode] = useState(false);
   const [hoveredLeagueId, setHoveredLeagueId] = useState<string | null>(null);
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
   const compactView = useCompactView();
@@ -130,14 +137,14 @@ export default function LeagueSearchPage() {
     queryFn: async () => {
       const response = await apiGet('/api/leagues');
       if (!response.ok) throw new Error('Failed to fetch user leagues');
-      return response.json();
+      return response.json() as Promise<LibraryLeague[]>;
     },
   });
 
   // Create a map of added leagues by external ID (includes logo URLs from database)
   const addedLeaguesMap = useMemo(() => {
     const map = new Map<string, AddedLeagueInfo & { logoUrl?: string }>();
-    userLeagues.forEach((league: any) => {
+    userLeagues.forEach((league) => {
       if (league.externalId) {
         map.set(league.externalId, {
           id: league.id,
@@ -330,8 +337,9 @@ export default function LeagueSearchPage() {
       retentionDays,
       allowHighlights,
       sessionTypeQualityProfiles,
-      rootFolderId,
-      enableDvr
+      // rootFolderId and enableDvr are part of the modal's payload but not of
+      // an edit: moving a league is its own flow, and DVR has its own toggle
+      // on the league page, which ignores both here for the same reason.
     }: {
       leagueId: number;
       monitoredTeamIds: string[];
@@ -469,21 +477,18 @@ export default function LeagueSearchPage() {
   // Helper to open add modal with stable data stored in ref
   const openAddModal = (league: League) => {
     addModalDataRef.current = { league, leagueId: null, editMode: false };
-    setEditMode(false);
     setIsModalOpen(true);
   };
 
   // Helper to open edit modal with stable data stored in ref
   const openEditModal = (league: League, leagueId: number) => {
     addModalDataRef.current = { league, leagueId, editMode: true };
-    setEditMode(true);
     setIsModalOpen(true);
   };
 
   // Helper to close add/edit modal and clean up ref
   const closeAddModal = () => {
     setIsModalOpen(false);
-    setEditMode(false);
     // Clear ref after modal transition completes
     setTimeout(() => {
       addModalDataRef.current = null;
@@ -492,7 +497,7 @@ export default function LeagueSearchPage() {
 
   // Helper to open delete confirmation with stable data
   const openDeleteModal = (leagueId: number, leagueName: string) => {
-    const userLeague = userLeagues.find((l: any) => l.id === leagueId);
+    const userLeague = userLeagues.find((l) => l.id === leagueId);
     const eventCount = userLeague?.eventCount || 0;
     deleteModalDataRef.current = { leagueId, leagueName, eventCount };
     setIsDeleteConfirmOpen(true);
@@ -668,14 +673,14 @@ export default function LeagueSearchPage() {
                       <button
                         onMouseEnter={() => setHoveredLeagueId(league.idLeague)}
                         onMouseLeave={() => setHoveredLeagueId(null)}
-                        onClick={(e) => { e.stopPropagation(); addedLeagueInfo && openDeleteModal(addedLeagueInfo.id, league.strLeague); }}
+                        onClick={(e) => { e.stopPropagation(); if (addedLeagueInfo) openDeleteModal(addedLeagueInfo.id, league.strLeague); }}
                         className="rounded-lg border border-green-700 px-4 py-2 text-sm font-medium text-green-400 transition-colors hover:border-red-700 hover:bg-red-900/30 hover:text-red-300"
                         title="Remove from Library"
                       >
                         {hoveredLeagueId === league.idLeague ? 'Remove' : 'Added'}
                       </button>
                       <button
-                        onClick={(e) => { e.stopPropagation(); addedLeagueInfo && openEditModal(league, addedLeagueInfo.id); }}
+                        onClick={(e) => { e.stopPropagation(); if (addedLeagueInfo) openEditModal(league, addedLeagueInfo.id); }}
                         className={BUTTON_INFO}
                         title="Edit League"
                       >
@@ -872,7 +877,7 @@ export default function LeagueSearchPage() {
                               onMouseLeave={() => setHoveredLeagueId(null)}
                               onClick={(e) => {
                                 e.stopPropagation();
-                                addedLeagueInfo && openDeleteModal(addedLeagueInfo.id, league.strLeague);
+                                if (addedLeagueInfo) openDeleteModal(addedLeagueInfo.id, league.strLeague);
                               }}
                               className={`flex-1 py-2 rounded-lg font-medium border transition-all flex items-center justify-center gap-2 ${
                                 hoveredLeagueId === league.idLeague
@@ -886,7 +891,7 @@ export default function LeagueSearchPage() {
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
-                                addedLeagueInfo && openEditModal(league, addedLeagueInfo.id);
+                                if (addedLeagueInfo) openEditModal(league, addedLeagueInfo.id);
                               }}
                               className="px-4 py-2 rounded-lg font-medium bg-blue-600 hover:bg-blue-700 text-white transition-colors"
                             >
