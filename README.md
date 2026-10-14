@@ -170,17 +170,24 @@ Sportarr is made better by everyone who has contributed code. Thank you.
                 </a>
             </td>
             <td align="center">
+                <a href="https://github.com/GMAzrael">
+                    <img src="https://avatars.githubusercontent.com/u/2205993?v=4" width="72;" alt="GMAzrael"/>
+                    <br />
+                    <sub><b>GMAzrael</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/TRusselo">
+                    <img src="https://avatars.githubusercontent.com/u/1154815?v=4" width="72;" alt="TRusselo"/>
+                    <br />
+                    <sub><b>TRusselo</b></sub>
+                </a>
+            </td>
+            <td align="center">
                 <a href="https://github.com/cdude5464">
                     <img src="https://avatars.githubusercontent.com/u/157808172?v=4" width="72;" alt="cdude5464"/>
                     <br />
                     <sub><b>cdude5464</b></sub>
-                </a>
-            </td>
-            <td align="center">
-                <a href="https://github.com/jasjeetsuri">
-                    <img src="https://avatars.githubusercontent.com/u/33685132?v=4" width="72;" alt="jasjeetsuri"/>
-                    <br />
-                    <sub><b>jasjeetsuri</b></sub>
                 </a>
             </td>
             <td align="center">
@@ -190,6 +197,15 @@ Sportarr is made better by everyone who has contributed code. Thank you.
                     <sub><b>nickperkins</b></sub>
                 </a>
             </td>
+		</tr>
+		<tr>
+            <td align="center">
+                <a href="https://github.com/safetyp1">
+                    <img src="https://avatars.githubusercontent.com/u/33685132?v=4" width="72;" alt="safetyp1"/>
+                    <br />
+                    <sub><b>safetyp1</b></sub>
+                </a>
+            </td>
             <td align="center">
                 <a href="https://github.com/scottrobertson">
                     <img src="https://avatars.githubusercontent.com/u/68361?v=4" width="72;" alt="scottrobertson"/>
@@ -197,8 +213,6 @@ Sportarr is made better by everyone who has contributed code. Thank you.
                     <sub><b>scottrobertson</b></sub>
                 </a>
             </td>
-		</tr>
-		<tr>
             <td align="center">
                 <a href="https://github.com/afrancke">
                     <img src="https://avatars.githubusercontent.com/u/6088682?v=4" width="72;" alt="afrancke"/>
@@ -227,11 +241,20 @@ Sportarr is made better by everyone who has contributed code. Thank you.
                     <sub><b>gilesw</b></sub>
                 </a>
             </td>
+		</tr>
+		<tr>
             <td align="center">
                 <a href="https://github.com/jpaull-nz">
                     <img src="https://avatars.githubusercontent.com/u/209406876?v=4" width="72;" alt="jpaull-nz"/>
                     <br />
                     <sub><b>jpaull-nz</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/kelly-vibe-coding">
+                    <img src="https://avatars.githubusercontent.com/u/255450271?v=4" width="72;" alt="kelly-vibe-coding"/>
+                    <br />
+                    <sub><b>kelly-vibe-coding</b></sub>
                 </a>
             </td>
             <td align="center">
@@ -241,8 +264,20 @@ Sportarr is made better by everyone who has contributed code. Thank you.
                     <sub><b>kristofferR</b></sub>
                 </a>
             </td>
-		</tr>
-		<tr>
+            <td align="center">
+                <a href="https://github.com/LavX">
+                    <img src="https://avatars.githubusercontent.com/u/30391756?v=4" width="72;" alt="LavX"/>
+                    <br />
+                    <sub><b>LavX</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/lenaxia">
+                    <img src="https://avatars.githubusercontent.com/u/6321838?v=4" width="72;" alt="lenaxia"/>
+                    <br />
+                    <sub><b>lenaxia</b></sub>
+                </a>
+            </td>
             <td align="center">
                 <a href="https://github.com/lustered">
                     <img src="https://avatars.githubusercontent.com/u/45863485?v=4" width="72;" alt="lustered"/>
@@ -250,6 +285,8 @@ Sportarr is made better by everyone who has contributed code. Thank you.
                     <sub><b>lustered</b></sub>
                 </a>
             </td>
+		</tr>
+		<tr>
             <td align="center">
                 <a href="https://github.com/lyrova-andy">
                     <img src="https://avatars.githubusercontent.com/u/277908091?v=4" width="72;" alt="lyrova-andy"/>
@@ -285,8 +322,6 @@ Sportarr is made better by everyone who has contributed code. Thank you.
                     <sub><b>Pukabyte</b></sub>
                 </a>
             </td>
-		</tr>
-		<tr>
             <td align="center">
                 <a href="https://github.com/schlort">
                     <img src="https://avatars.githubusercontent.com/u/6138053?v=4" width="72;" alt="schlort"/>
@@ -294,6 +329,8 @@ Sportarr is made better by everyone who has contributed code. Thank you.
                     <sub><b>schlort</b></sub>
                 </a>
             </td>
+		</tr>
+		<tr>
             <td align="center">
                 <a href="https://github.com/skjaere">
                     <img src="https://avatars.githubusercontent.com/u/183823742?v=4" width="72;" alt="skjaere"/>
@@ -306,6 +343,20 @@ Sportarr is made better by everyone who has contributed code. Thank you.
                     <img src="https://avatars.githubusercontent.com/u/94804320?v=4" width="72;" alt="slflowfoon"/>
                     <br />
                     <sub><b>slflowfoon</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/stormshaker">
+                    <img src="https://avatars.githubusercontent.com/u/2807460?v=4" width="72;" alt="stormshaker"/>
+                    <br />
+                    <sub><b>stormshaker</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/Stxtics">
+                    <img src="https://avatars.githubusercontent.com/u/18367146?v=4" width="72;" alt="Stxtics"/>
+                    <br />
+                    <sub><b>Stxtics</b></sub>
                 </a>
             </td>
 		</tr>
