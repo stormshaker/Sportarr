@@ -944,7 +944,7 @@ export default function TeamsPage() {
                           : 'border-red-900/30 hover:border-red-700/50'
                       }`}
                     >
-                      <div className="flex items-center p-3 sm:p-4">
+                      <div className="flex flex-wrap items-center gap-y-3 p-3 sm:p-4">
                         <div className="h-10 w-10 sm:h-16 sm:w-16 bg-black/50 flex items-center justify-center rounded-lg mr-3 sm:mr-4 flex-shrink-0">
                           {team.badgeUrl ? (
                             <img
@@ -961,7 +961,7 @@ export default function TeamsPage() {
                           )}
                         </div>
 
-                        <div className="flex-1 min-w-0">
+                        <div className="flex-1 min-w-[10rem]">
                           <h3 className="text-base sm:text-lg font-bold text-white truncate">
                             {team.name}
                           </h3>
@@ -970,7 +970,7 @@ export default function TeamsPage() {
                               {team.alternateName}
                             </p>
                           )}
-                          <div className="flex items-center gap-2 mt-1">
+                          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mt-1">
                             <span className="px-2 py-0.5 bg-red-600/20 text-red-400 text-xs rounded font-medium">
                               {team.sport}
                             </span>
@@ -983,7 +983,7 @@ export default function TeamsPage() {
                           </div>
                         </div>
 
-                        <div className="flex items-center gap-1 sm:gap-2 ml-2 sm:ml-4 flex-shrink-0">
+                        <div className="flex items-center gap-1 sm:gap-2 ml-auto pl-2 sm:pl-4 flex-shrink-0">
                           {isFollowed ? (
                             <>
                               <button
